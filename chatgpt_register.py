@@ -1,7 +1,7 @@
 """
-ChatGPT 批量自动注册工具 (并发版) - DuckMail 临时邮箱版
+ChatGPT 批量自动注册工具 (并发版) - Mailu 邮箱版
 依赖: pip install curl_cffi
-功能: 使用 DuckMail 临时邮箱，并发自动注册 ChatGPT 账号，自动获取 OTP 验证码
+功能: 使用自建 Mailu 邮箱服务器，并发自动注册 ChatGPT 账号，自动获取 OTP 验证码
 """
 
 import os
@@ -17,6 +17,8 @@ import traceback
 import secrets
 import hashlib
 import base64
+import imaplib
+import email
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, urlencode
 
@@ -27,8 +29,15 @@ def _load_config():
     """从 config.json 加载配置，环境变量优先级更高"""
     config = {
         "total_accounts": 3,
-        "duckmail_api_base": "https://api.duckmail.sbs",
-        "duckmail_bearer": "",
+        "mailu_base_url": "https://mail.oracle.311200.xyz",
+        "mailu_api_token": "",
+        "mail_domain": "oracle.311200.xyz",
+        "mailbox_quota_bytes": 1073741824,
+        "imap_host": "mail.oracle.311200.xyz",
+        "imap_port": 993,
+        "imap_ssl": True,
+        "imap_folder": "INBOX",
+        "imap_timeout": 20,
         "proxy": "",
         "output_file": "registered_accounts.txt",
         "enable_oauth": True,
@@ -53,8 +62,15 @@ def _load_config():
             print(f"⚠️ 加载 config.json 失败: {e}")
 
     # 环境变量优先级更高
-    config["duckmail_api_base"] = os.environ.get("DUCKMAIL_API_BASE", config["duckmail_api_base"])
-    config["duckmail_bearer"] = os.environ.get("DUCKMAIL_BEARER", config["duckmail_bearer"])
+    config["mailu_base_url"] = os.environ.get("MAILU_BASE_URL", config["mailu_base_url"])
+    config["mailu_api_token"] = os.environ.get("MAILU_API_TOKEN", config["mailu_api_token"])
+    config["mail_domain"] = os.environ.get("MAIL_DOMAIN", config["mail_domain"])
+    config["mailbox_quota_bytes"] = int(os.environ.get("MAILBOX_QUOTA_BYTES", config["mailbox_quota_bytes"]))
+    config["imap_host"] = os.environ.get("IMAP_HOST", config["imap_host"])
+    config["imap_port"] = int(os.environ.get("IMAP_PORT", config["imap_port"]))
+    config["imap_ssl"] = os.environ.get("IMAP_SSL", config["imap_ssl"])
+    config["imap_folder"] = os.environ.get("IMAP_FOLDER", config["imap_folder"])
+    config["imap_timeout"] = int(os.environ.get("IMAP_TIMEOUT", config["imap_timeout"]))
     config["proxy"] = os.environ.get("PROXY", config["proxy"])
     config["total_accounts"] = int(os.environ.get("TOTAL_ACCOUNTS", config["total_accounts"]))
     config["enable_oauth"] = os.environ.get("ENABLE_OAUTH", config["enable_oauth"])
@@ -80,8 +96,15 @@ def _as_bool(value):
 
 
 _CONFIG = _load_config()
-DUCKMAIL_API_BASE = _CONFIG["duckmail_api_base"]
-DUCKMAIL_BEARER = _CONFIG["duckmail_bearer"]
+MAILU_BASE_URL = _CONFIG["mailu_base_url"].rstrip("/")
+MAILU_API_TOKEN = _CONFIG["mailu_api_token"]
+MAIL_DOMAIN = _CONFIG["mail_domain"]
+MAILBOX_QUOTA_BYTES = int(_CONFIG.get("mailbox_quota_bytes", 1073741824))
+IMAP_HOST = _CONFIG["imap_host"]
+IMAP_PORT = int(_CONFIG["imap_port"])
+IMAP_SSL = _as_bool(_CONFIG.get("imap_ssl", True))
+IMAP_FOLDER = _CONFIG.get("imap_folder", "INBOX")
+IMAP_TIMEOUT = int(_CONFIG.get("imap_timeout", 20))
 DEFAULT_TOTAL_ACCOUNTS = _CONFIG["total_accounts"]
 DEFAULT_PROXY = _CONFIG["proxy"]
 DEFAULT_OUTPUT_FILE = _CONFIG["output_file"]
@@ -96,10 +119,13 @@ TOKEN_JSON_DIR = _CONFIG["token_json_dir"]
 UPLOAD_API_URL = _CONFIG["upload_api_url"]
 UPLOAD_API_TOKEN = _CONFIG["upload_api_token"]
 
-if not DUCKMAIL_BEARER:
-    print("⚠️ 警告: 未设置 DUCKMAIL_BEARER，请在 config.json 中设置或设置环境变量")
-    print("   文件: config.json -> duckmail_bearer")
-    print("   环境变量: export DUCKMAIL_BEARER='your_api_key_here'")
+# 代理固定值（不再读取 config/env）
+FIXED_PROXY = "http://192.168.1.101:7890"
+
+if not MAILU_API_TOKEN:
+    print("⚠️ 警告: 未设置 MAILU_API_TOKEN，请在 config.json 中设置或设置环境变量")
+    print("   文件: config.json -> mailu_api_token")
+    print("   环境变量: export MAILU_API_TOKEN='your_api_key_here'")
 
 # 全局线程锁
 _print_lock = threading.Lock()
@@ -122,11 +148,6 @@ _CHROME_PROFILES = [
         "major": 136, "impersonate": "chrome136",
         "build": 7103, "patch_range": (48, 175),
         "sec_ch_ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
-    },
-    {
-        "major": 142, "impersonate": "chrome142",
-        "build": 7540, "patch_range": (30, 150),
-        "sec_ch_ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
     },
 ]
 
@@ -480,10 +501,10 @@ def _generate_password(length=14):
     return "".join(pwd)
 
 
-# ================= DuckMail 邮箱函数 =================
+# ================= Mailu 邮箱函数 =================
 
-def _create_duckmail_session():
-    """创建带重试的 DuckMail 请求会话"""
+def _create_mailu_session():
+    """创建 Mailu API 请求会话"""
     session = curl_requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -493,105 +514,131 @@ def _create_duckmail_session():
     return session
 
 
-def create_temp_email():
-    """创建 DuckMail 临时邮箱，返回 (email, password, mail_token)"""
-    if not DUCKMAIL_BEARER:
-        raise Exception("DUCKMAIL_BEARER 未设置，无法创建临时邮箱")
+def _create_mailbox_mailu(email_addr: str, password: str):
+    """通过 Mailu API 创建邮箱账号"""
+    if not MAILU_API_TOKEN:
+        raise Exception("MAILU_API_TOKEN 未设置，无法创建邮箱")
 
+    headers = {"Authorization": f"Bearer {MAILU_API_TOKEN}"}
+    payload = {
+        "email": email_addr,
+        "raw_password": password,
+        "quota_bytes": MAILBOX_QUOTA_BYTES,
+        "enabled": True,
+        "global_admin": False,
+    }
+
+    session = _create_mailu_session()
+    res = session.post(
+        f"{MAILU_BASE_URL}/api/v1/user",
+        json=payload,
+        headers=headers,
+        timeout=20,
+        impersonate="chrome131",
+    )
+
+    if res.status_code not in [200, 201]:
+        raise Exception(f"创建邮箱失败: {res.status_code} - {res.text[:200]}")
+
+
+def create_temp_email():
+    """创建 Mailu 邮箱，返回 (email, password)"""
     # 生成随机邮箱前缀 8-13 位
     chars = string.ascii_lowercase + string.digits
     length = random.randint(8, 13)
     email_local = "".join(random.choice(chars) for _ in range(length))
-    email = f"{email_local}@duckmail.sbs"
+    email_addr = f"{email_local}@{MAIL_DOMAIN}"
     password = _generate_password()
 
-    api_base = DUCKMAIL_API_BASE.rstrip("/")
-    headers = {"Authorization": f"Bearer {DUCKMAIL_BEARER}"}
-    session = _create_duckmail_session()
-
     try:
-        # 1. 创建账号
-        payload = {"address": email, "password": password}
-        res = session.post(
-            f"{api_base}/accounts",
-            json=payload,
-            headers=headers,
-            timeout=15,
-            impersonate="chrome131"
-        )
-
-        if res.status_code not in [200, 201]:
-            raise Exception(f"创建邮箱失败: {res.status_code} - {res.text[:200]}")
-
-        # 2. 获取 Token（用于读取邮件）
-        time.sleep(0.5)
-        token_payload = {"address": email, "password": password}
-        token_res = session.post(
-            f"{api_base}/token",
-            json=token_payload,
-            timeout=15,
-            impersonate="chrome131"
-        )
-
-        if token_res.status_code == 200:
-            token_data = token_res.json()
-            mail_token = token_data.get("token")
-            if mail_token:
-                return email, password, mail_token
-
-        raise Exception(f"获取邮件 Token 失败: {token_res.status_code}")
-
+        _create_mailbox_mailu(email_addr, password)
+        return email_addr, password
     except Exception as e:
-        raise Exception(f"DuckMail 创建邮箱失败: {e}")
+        raise Exception(f"Mailu 创建邮箱失败: {e}")
 
 
-def _fetch_emails_duckmail(mail_token: str):
-    """从 DuckMail 获取邮件列表"""
+def _decode_email_part(part):
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        raw = part.get_payload()
+        return raw if isinstance(raw, str) else ""
+    charset = part.get_content_charset() or "utf-8"
     try:
-        api_base = DUCKMAIL_API_BASE.rstrip("/")
-        headers = {"Authorization": f"Bearer {mail_token}"}
-        session = _create_duckmail_session()
-
-        res = session.get(
-            f"{api_base}/messages",
-            headers=headers,
-            timeout=15,
-            impersonate="chrome131"
-        )
-
-        if res.status_code == 200:
-            data = res.json()
-            # DuckMail API 返回格式可能是 hydra:member 或 member
-            messages = data.get("hydra:member") or data.get("member") or data.get("data") or []
-            return messages
-        return []
-    except Exception as e:
-        return []
-
-
-def _fetch_email_detail_duckmail(mail_token: str, msg_id: str):
-    """获取 DuckMail 单封邮件详情"""
-    try:
-        api_base = DUCKMAIL_API_BASE.rstrip("/")
-        headers = {"Authorization": f"Bearer {mail_token}"}
-        session = _create_duckmail_session()
-
-        # 处理 msg_id 格式
-        if isinstance(msg_id, str) and msg_id.startswith("/messages/"):
-            msg_id = msg_id.split("/")[-1]
-
-        res = session.get(
-            f"{api_base}/messages/{msg_id}",
-            headers=headers,
-            timeout=15,
-            impersonate="chrome131"
-        )
-
-        if res.status_code == 200:
-            return res.json()
+        return payload.decode(charset, errors="replace")
     except Exception:
-        pass
-    return None
+        return payload.decode("utf-8", errors="replace")
+
+
+def _extract_text_from_message(msg):
+    texts = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            disp = str(part.get("Content-Disposition") or "").lower()
+            if content_type in ("text/plain", "text/html") and "attachment" not in disp:
+                text = _decode_email_part(part)
+                if text:
+                    texts.append(text)
+    else:
+        text = _decode_email_part(msg)
+        if text:
+            texts.append(text)
+    return "\n".join(texts)
+
+
+def _imap_connect():
+    if not IMAP_HOST:
+        return None
+    try:
+        if IMAP_SSL:
+            try:
+                return imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=IMAP_TIMEOUT)
+            except TypeError:
+                return imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        try:
+            return imaplib.IMAP4(IMAP_HOST, IMAP_PORT, timeout=IMAP_TIMEOUT)
+        except TypeError:
+            return imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+    except Exception:
+        return None
+
+
+def _imap_fetch_latest_texts(email_addr: str, email_password: str, limit: int = 8):
+    conn = _imap_connect()
+    if not conn:
+        return []
+    try:
+        conn.login(email_addr, email_password)
+        conn.select(IMAP_FOLDER)
+
+        typ, data = conn.search(None, "UNSEEN")
+        ids = data[0].split() if typ == "OK" else []
+        if not ids:
+            typ, data = conn.search(None, "ALL")
+            ids = data[0].split() if typ == "OK" else []
+        if not ids:
+            return []
+
+        ids = ids[-limit:]
+        texts = []
+        for msg_id in reversed(ids):
+            typ, msg_data = conn.fetch(msg_id, "(BODY.PEEK[])")
+            if typ != "OK":
+                continue
+            for item in msg_data:
+                if isinstance(item, tuple):
+                    msg = email.message_from_bytes(item[1])
+                    text = _extract_text_from_message(msg)
+                    if text:
+                        texts.append(text)
+        return texts
+    except Exception:
+        return []
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
 
 
 def _extract_verification_code(email_content: str):
@@ -617,25 +664,16 @@ def _extract_verification_code(email_content: str):
     return None
 
 
-def wait_for_verification_email(mail_token: str, timeout: int = 120):
+def wait_for_verification_email(email_addr: str, email_password: str, timeout: int = 120):
     """等待并提取 OpenAI 验证码"""
     start_time = time.time()
 
     while time.time() - start_time < timeout:
-        messages = _fetch_emails_duckmail(mail_token)
-        if messages and len(messages) > 0:
-            # 获取最新邮件详情
-            first_msg = messages[0]
-            msg_id = first_msg.get("id") or first_msg.get("@id")
-
-            if msg_id:
-                detail = _fetch_email_detail_duckmail(mail_token, msg_id)
-                if detail:
-                    # DuckMail 的邮件内容在 text 或 html 字段
-                    content = detail.get("text") or detail.get("html") or ""
-                    code = _extract_verification_code(content)
-                    if code:
-                        return code
+        texts = _imap_fetch_latest_texts(email_addr, email_password, limit=8)
+        for content in texts:
+            code = _extract_verification_code(content)
+            if code:
+                return code
 
         time.sleep(3)
 
@@ -719,10 +757,10 @@ class ChatGPTRegister:
         with _print_lock:
             print(f"{prefix}{msg}")
 
-    # ==================== DuckMail 临时邮箱 ====================
+    # ==================== Mailu 邮箱 ====================
 
-    def _create_duckmail_session(self):
-        """创建带重试的 DuckMail 请求会话"""
+    def _create_mailu_session(self):
+        """创建 Mailu API 请求会话"""
         session = curl_requests.Session()
         session.headers.update({
             "User-Agent": self.ua,
@@ -734,100 +772,42 @@ class ChatGPTRegister:
         return session
 
     def create_temp_email(self):
-        """创建 DuckMail 临时邮箱，返回 (email, password, mail_token)"""
-        if not DUCKMAIL_BEARER:
-            raise Exception("DUCKMAIL_BEARER 未设置，无法创建临时邮箱")
+        """创建 Mailu 邮箱，返回 (email, password)"""
+        if not MAILU_API_TOKEN:
+            raise Exception("MAILU_API_TOKEN 未设置，无法创建邮箱")
 
-        # 生成随机邮箱前缀 8-13 位
         chars = string.ascii_lowercase + string.digits
         length = random.randint(8, 13)
         email_local = "".join(random.choice(chars) for _ in range(length))
-        email = f"{email_local}@duckmail.sbs"
+        email_addr = f"{email_local}@{MAIL_DOMAIN}"
         password = _generate_password()
 
-        api_base = DUCKMAIL_API_BASE.rstrip("/")
-        headers = {"Authorization": f"Bearer {DUCKMAIL_BEARER}"}
-        session = self._create_duckmail_session()
+        payload = {
+            "email": email_addr,
+            "raw_password": password,
+            "quota_bytes": MAILBOX_QUOTA_BYTES,
+            "enabled": True,
+            "global_admin": False,
+        }
+        headers = {"Authorization": f"Bearer {MAILU_API_TOKEN}"}
+        session = self._create_mailu_session()
 
         try:
-            # 1. 创建账号
-            payload = {"address": email, "password": password}
             res = session.post(
-                f"{api_base}/accounts",
+                f"{MAILU_BASE_URL}/api/v1/user",
                 json=payload,
                 headers=headers,
-                timeout=15,
-                impersonate=self.impersonate
+                timeout=20,
+                impersonate=self.impersonate,
             )
-
             if res.status_code not in [200, 201]:
                 raise Exception(f"创建邮箱失败: {res.status_code} - {res.text[:200]}")
-
-            # 2. 获取 Token（用于读取邮件）
-            time.sleep(0.5)
-            token_payload = {"address": email, "password": password}
-            token_res = session.post(
-                f"{api_base}/token",
-                json=token_payload,
-                timeout=15,
-                impersonate=self.impersonate
-            )
-
-            if token_res.status_code == 200:
-                token_data = token_res.json()
-                mail_token = token_data.get("token")
-                if mail_token:
-                    return email, password, mail_token
-
-            raise Exception(f"获取邮件 Token 失败: {token_res.status_code}")
-
+            return email_addr, password
         except Exception as e:
-            raise Exception(f"DuckMail 创建邮箱失败: {e}")
+            raise Exception(f"Mailu 创建邮箱失败: {e}")
 
-    def _fetch_emails_duckmail(self, mail_token: str):
-        """从 DuckMail 获取邮件列表"""
-        try:
-            api_base = DUCKMAIL_API_BASE.rstrip("/")
-            headers = {"Authorization": f"Bearer {mail_token}"}
-            session = self._create_duckmail_session()
-
-            res = session.get(
-                f"{api_base}/messages",
-                headers=headers,
-                timeout=15,
-                impersonate=self.impersonate
-            )
-
-            if res.status_code == 200:
-                data = res.json()
-                messages = data.get("hydra:member") or data.get("member") or data.get("data") or []
-                return messages
-            return []
-        except Exception:
-            return []
-
-    def _fetch_email_detail_duckmail(self, mail_token: str, msg_id: str):
-        """获取 DuckMail 单封邮件详情"""
-        try:
-            api_base = DUCKMAIL_API_BASE.rstrip("/")
-            headers = {"Authorization": f"Bearer {mail_token}"}
-            session = self._create_duckmail_session()
-
-            if isinstance(msg_id, str) and msg_id.startswith("/messages/"):
-                msg_id = msg_id.split("/")[-1]
-
-            res = session.get(
-                f"{api_base}/messages/{msg_id}",
-                headers=headers,
-                timeout=15,
-                impersonate=self.impersonate
-            )
-
-            if res.status_code == 200:
-                return res.json()
-        except Exception:
-            pass
-        return None
+    def _fetch_recent_mail_texts(self, email_addr: str, email_password: str, limit: int = 8):
+        return _imap_fetch_latest_texts(email_addr, email_password, limit=limit)
 
     def _extract_verification_code(self, email_content: str):
         """从邮件内容提取 6 位验证码"""
@@ -851,25 +831,18 @@ class ChatGPTRegister:
                 return code
         return None
 
-    def wait_for_verification_email(self, mail_token: str, timeout: int = 120):
+    def wait_for_verification_email(self, email_addr: str, email_password: str, timeout: int = 120):
         """等待并提取 OpenAI 验证码"""
         self._print(f"[OTP] 等待验证码邮件 (最多 {timeout}s)...")
         start_time = time.time()
 
         while time.time() - start_time < timeout:
-            messages = self._fetch_emails_duckmail(mail_token)
-            if messages and len(messages) > 0:
-                first_msg = messages[0]
-                msg_id = first_msg.get("id") or first_msg.get("@id")
-
-                if msg_id:
-                    detail = self._fetch_email_detail_duckmail(mail_token, msg_id)
-                    if detail:
-                        content = detail.get("text") or detail.get("html") or ""
-                        code = self._extract_verification_code(content)
-                        if code:
-                            self._print(f"[OTP] 验证码: {code}")
-                            return code
+            texts = self._fetch_recent_mail_texts(email_addr, email_password, limit=8)
+            for content in texts:
+                code = self._extract_verification_code(content)
+                if code:
+                    self._print(f"[OTP] 验证码: {code}")
+                    return code
 
             elapsed = int(time.time() - start_time)
             self._print(f"[OTP] 等待中... ({elapsed}s/{timeout}s)")
@@ -990,8 +963,8 @@ class ChatGPTRegister:
 
     # ==================== 自动注册主流程 ====================
 
-    def run_register(self, email, password, name, birthdate, mail_token):
-        """使用 DuckMail 的注册流程"""
+    def run_register(self, email, password, name, birthdate, mail_password):
+        """使用 Mailu 的注册流程"""
         self.visit_homepage()
         _random_delay(0.3, 0.8)
         csrf = self.get_csrf()
@@ -1038,8 +1011,8 @@ class ChatGPTRegister:
             need_otp = True
 
         if need_otp:
-            # 使用 DuckMail 等待验证码
-            otp_code = self.wait_for_verification_email(mail_token)
+            # 使用 Mailu 等待验证码
+            otp_code = self.wait_for_verification_email(email, mail_password, timeout=300)
             if not otp_code:
                 raise Exception("未能获取验证码")
 
@@ -1049,7 +1022,7 @@ class ChatGPTRegister:
                 self._print("验证码失败，重试...")
                 self.send_otp()
                 _random_delay(1.0, 2.0)
-                otp_code = self.wait_for_verification_email(mail_token, timeout=60)
+                otp_code = self.wait_for_verification_email(email, mail_password, timeout=180)
                 if not otp_code:
                     raise Exception("重试后仍未获取验证码")
                 _random_delay(0.3, 0.8)
@@ -1340,7 +1313,7 @@ class ChatGPTRegister:
 
         return None
 
-    def perform_codex_oauth_login_http(self, email: str, password: str, mail_token: str = None):
+    def perform_codex_oauth_login_http(self, email: str, password: str, mail_password: str = None):
         self._print("[OAuth] 开始执行 Codex OAuth 纯协议流程...")
 
         # 兼容两种 domain 形式，确保 auth 域也带 oai-did
@@ -1545,34 +1518,27 @@ class ChatGPTRegister:
 
         if need_oauth_otp:
             self._print("[OAuth] 4/7 检测到邮箱 OTP 验证")
-            if not mail_token:
-                self._print("[OAuth] OAuth 阶段需要邮箱 OTP，但未提供 mail_token")
+            if not mail_password:
+                self._print("[OAuth] OAuth 阶段需要邮箱 OTP，但未提供邮箱密码")
                 return None
 
             headers_otp = _oauth_json_headers(f"{OAUTH_ISSUER}/email-verification")
             tried_codes = set()
             otp_success = False
-            otp_deadline = time.time() + 120
+            otp_deadline = time.time() + 300
 
             while time.time() < otp_deadline and not otp_success:
-                messages = self._fetch_emails_duckmail(mail_token) or []
                 candidate_codes = []
 
-                for msg in messages[:12]:
-                    msg_id = msg.get("id") or msg.get("@id")
-                    if not msg_id:
-                        continue
-                    detail = self._fetch_email_detail_duckmail(mail_token, msg_id)
-                    if not detail:
-                        continue
-                    content = detail.get("text") or detail.get("html") or ""
+                texts = self._fetch_recent_mail_texts(email, mail_password, limit=12)
+                for content in texts:
                     code = self._extract_verification_code(content)
                     if code and code not in tried_codes:
                         candidate_codes.append(code)
 
                 if not candidate_codes:
-                    elapsed = int(120 - max(0, otp_deadline - time.time()))
-                    self._print(f"[OAuth] OTP 等待中... ({elapsed}s/120s)")
+                    elapsed = int(300 - max(0, otp_deadline - time.time()))
+                    self._print(f"[OAuth] OTP 等待中... ({elapsed}s/300s)")
                     time.sleep(2)
                     continue
 
@@ -1694,14 +1660,14 @@ class ChatGPTRegister:
 # ==================== 并发批量注册 ====================
 
 def _register_one(idx, total, proxy, output_file):
-    """单个注册任务 (在线程中运行) - 使用 DuckMail 临时邮箱"""
+    """单个注册任务 (在线程中运行) - 使用 Mailu 邮箱"""
     reg = None
     try:
         reg = ChatGPTRegister(proxy=proxy, tag=f"{idx}")
 
-        # 1. 创建 DuckMail 临时邮箱
-        reg._print("[DuckMail] 创建临时邮箱...")
-        email, email_pwd, mail_token = reg.create_temp_email()
+        # 1. 创建 Mailu 邮箱
+        reg._print("[Mailu] 创建邮箱...")
+        email, email_pwd = reg.create_temp_email()
         tag = email.split("@")[0]
         reg.tag = tag  # 更新 tag
 
@@ -1718,13 +1684,13 @@ def _register_one(idx, total, proxy, output_file):
             print(f"{'='*60}")
 
         # 2. 执行注册流程
-        reg.run_register(email, chatgpt_password, name, birthdate, mail_token)
+        reg.run_register(email, chatgpt_password, name, birthdate, email_pwd)
 
         # 3. OAuth（可选）
         oauth_ok = True
         if ENABLE_OAUTH:
             reg._print("[OAuth] 开始获取 Codex Token...")
-            tokens = reg.perform_codex_oauth_login_http(email, chatgpt_password, mail_token=mail_token)
+            tokens = reg.perform_codex_oauth_login_http(email, chatgpt_password, mail_password=email_pwd)
             oauth_ok = bool(tokens and tokens.get("access_token"))
             if oauth_ok:
                 _save_codex_tokens(email, tokens)
@@ -1754,19 +1720,21 @@ def _register_one(idx, total, proxy, output_file):
 
 def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
               max_workers=3, proxy=None):
-    """并发批量注册 - DuckMail 临时邮箱版"""
+    """并发批量注册 - Mailu 邮箱版"""
 
-    if not DUCKMAIL_BEARER:
-        print("❌ 错误: 未设置 DUCKMAIL_BEARER 环境变量")
-        print("   请设置: export DUCKMAIL_BEARER='your_api_key_here'")
-        print("   或: set DUCKMAIL_BEARER=your_api_key_here (Windows)")
+    if not MAILU_API_TOKEN:
+        print("❌ 错误: 未设置 MAILU_API_TOKEN 环境变量")
+        print("   请设置: export MAILU_API_TOKEN='your_api_key_here'")
+        print("   或: set MAILU_API_TOKEN=your_api_key_here (Windows)")
         return
 
     actual_workers = min(max_workers, total_accounts)
     print(f"\n{'#'*60}")
-    print(f"  ChatGPT 批量自动注册 (DuckMail 临时邮箱版)")
+    print(f"  ChatGPT 批量自动注册 (Mailu 邮箱版)")
     print(f"  注册数量: {total_accounts} | 并发数: {actual_workers}")
-    print(f"  DuckMail: {DUCKMAIL_API_BASE}")
+    print(f"  Mailu API: {MAILU_BASE_URL}")
+    print(f"  Mail Domain: {MAIL_DOMAIN}")
+    print(f"  IMAP: {IMAP_HOST}:{IMAP_PORT} | SSL: {'是' if IMAP_SSL else '否'}")
     print(f"  OAuth: {'开启' if ENABLE_OAUTH else '关闭'} | required: {'是' if OAUTH_REQUIRED else '否'}")
     if ENABLE_OAUTH:
         print(f"  OAuth Issuer: {OAUTH_ISSUER}")
@@ -1814,42 +1782,25 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
 
 def main():
     print("=" * 60)
-    print("  ChatGPT 批量自动注册工具 (DuckMail 临时邮箱版)")
+    print("  ChatGPT 批量自动注册工具 (Mailu 邮箱版)")
     print("=" * 60)
 
-    # 检查 DuckMail 配置
-    if not DUCKMAIL_BEARER:
-        print("\n⚠️  警告: 未设置 DUCKMAIL_BEARER")
-        print("   请编辑 config.json 设置 duckmail_bearer，或设置环境变量:")
-        print("   Windows: set DUCKMAIL_BEARER=your_api_key_here")
-        print("   Linux/Mac: export DUCKMAIL_BEARER='your_api_key_here'")
+    # 检查 Mailu 配置
+    if not MAILU_API_TOKEN:
+        print("\n⚠️  警告: 未设置 MAILU_API_TOKEN")
+        print("   请编辑 config.json 设置 mailu_api_token，或设置环境变量:")
+        print("   Windows: set MAILU_API_TOKEN=your_api_key_here")
+        print("   Linux/Mac: export MAILU_API_TOKEN='your_api_key_here'")
         print("\n   按 Enter 继续尝试运行 (可能会失败)...")
         input()
 
-    # 交互式代理配置
-    proxy = DEFAULT_PROXY
-    if proxy:
-        print(f"[Info] 检测到默认代理: {proxy}")
-        use_default = input("使用此代理? (Y/n): ").strip().lower()
-        if use_default == "n":
-            proxy = input("输入代理地址 (留空=不使用代理): ").strip() or None
-    else:
-        env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") \
-                 or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
-        if env_proxy:
-            print(f"[Info] 检测到环境变量代理: {env_proxy}")
-            use_env = input("使用此代理? (Y/n): ").strip().lower()
-            if use_env == "n":
-                proxy = input("输入代理地址 (留空=不使用代理): ").strip() or None
-            else:
-                proxy = env_proxy
-        else:
-            proxy = input("输入代理地址 (如 http://127.0.0.1:7890，留空=不使用代理): ").strip() or None
+    # 固定代理配置（硬编码）
+    proxy = FIXED_PROXY
 
     if proxy:
         print(f"[Info] 使用代理: {proxy}")
     else:
-        print("[Info] 不使用代理")
+        print("[Info] 未配置代理")
 
     # 输入注册数量
     count_input = input(f"\n注册账号数量 (默认 {DEFAULT_TOTAL_ACCOUNTS}): ").strip()

@@ -1,11 +1,11 @@
 # ChatGPT 批量自动注册工具
 
-> 使用 DuckMail 临时邮箱，并发自动注册 ChatGPT 账号
+> 使用 Mailu 邮箱服务器，并发自动注册 ChatGPT 账号
 
 ## 功能
 
-- 📨 自动创建临时邮箱 (DuckMail)
-- 📥 自动获取 OTP 验证码
+- 📨 自动创建邮箱账号 (Mailu API)
+- 📥 通过 IMAP 自动获取 OTP 验证码
 - ⚡ 支持并发注册多个账号
 - 🔄 自动处理 OAuth 登录
 - ☁️ 支持代理配置
@@ -22,8 +22,15 @@ pip install curl_cffi
 ```json
 {
   "total_accounts": 5,
-  "duckmail_api_base": "https://api.duckmail.sbs",
-  "duckmail_bearer": "你的 DuckMail API Token",
+  "mailu_base_url": "https://mail.oracle.311200.xyz",
+  "mailu_api_token": "你的 Mailu API Token",
+  "mail_domain": "oracle.311200.xyz",
+  "mailbox_quota_bytes": 1073741824,
+  "imap_host": "mail.oracle.311200.xyz",
+  "imap_port": 993,
+  "imap_ssl": true,
+  "imap_folder": "INBOX",
+  "imap_timeout": 20,
   "proxy": "http://127.0.0.1:7890",
   "output_file": "registered_accounts.txt",
   "enable_oauth": true,
@@ -36,7 +43,15 @@ pip install curl_cffi
 | 配置项 | 说明 |
 |--------|------|
 | total_accounts | 注册账号数量 |
-| duckmail_bearer | DuckMail API Token |
+| mailu_base_url | Mailu API 地址 |
+| mailu_api_token | Mailu API Token |
+| mail_domain | 邮箱域名 |
+| mailbox_quota_bytes | 邮箱容量（字节） |
+| imap_host | IMAP 主机 |
+| imap_port | IMAP 端口 |
+| imap_ssl | 是否启用 IMAP SSL |
+| imap_folder | IMAP 文件夹（默认 INBOX） |
+| imap_timeout | IMAP 超时（秒） |
 | proxy | 代理地址 (可选) |
 | output_file | 输出账号文件 |
 | enable_oauth | 启用 OAuth 登录 |
@@ -60,6 +75,8 @@ pip install curl_cffi
 python chatgpt_register.py
 ```
 
+程序会直接使用代码内硬编码代理：`http://192.168.1.101:7890`，不再读取 `config.json` 或环境变量，也不再交互询问。
+
 ## 输出
 
 注册成功的账号会保存到 `registered_accounts.txt`
@@ -82,6 +99,7 @@ chatgpt_register/
 ## 注意事项
 
 - 需要有效的代理才能注册成功
-- DuckMail API Token 需要从 https://duckmail.sbs 获取
+- Mailu API Token 需在你的 Mailu 管理端创建
+- 确保 IMAP(993) 可访问
 - 建议使用代理避免 IP 被封
 - 使用 CPA 面板需要先部署面板服务

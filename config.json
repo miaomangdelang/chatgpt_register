@@ -1,12 +1,19 @@
 {
-  "_comment": "ChatGPT(DuckMail)",
+  "_comment": "ChatGPT(Mailu)",
 
-  "total_accounts": 5,
+  "total_accounts": 1,
 
-  "duckmail_api_base": "https://api.duckmail.sbs",
-  "duckmail_bearer": "",
+  "mailu_base_url": "https://mail.oracle.311200.xyz",
+  "mailu_api_token": "",
+  "mail_domain": "oracle.311200.xyz",
+  "mailbox_quota_bytes": 1073741824,
+  "imap_host": "mail.oracle.311200.xyz",
+  "imap_port": 993,
+  "imap_ssl": true,
+  "imap_folder": "INBOX",
+  "imap_timeout": 20,
 
-  "proxy": "",
+  "proxy": "http://192.168.1.101:7890",
 
   "output_file": "registered_accounts.txt",
   "enable_oauth": true,
@@ -18,5 +25,5 @@
   "rk_file": "rk.txt",
   "token_json_dir": "codex_tokens",
   "upload_api_url": "http://localhost:8317/v0/management/auth-files",
-  "upload_api_token": "你的cpa面板登录密码"
+  "upload_api_token": "helloworld"
 }
