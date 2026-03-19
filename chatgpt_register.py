@@ -121,6 +121,8 @@ UPLOAD_API_TOKEN = _CONFIG["upload_api_token"]
 
 # 代理固定值（不再读取 config/env）
 FIXED_PROXY = "http://192.168.1.101:7890"
+# OTP 等待轮次（秒）：5 分钟 + 10 分钟
+OTP_WAIT_ROUNDS = [300, 600]
 
 if not MAILU_API_TOKEN:
     print("⚠️ 警告: 未设置 MAILU_API_TOKEN，请在 config.json 中设置或设置环境变量")
@@ -851,6 +853,17 @@ class ChatGPTRegister:
         self._print(f"[OTP] 超时 ({timeout}s)")
         return None
 
+    def wait_for_otp_rounds(self, email_addr: str, email_password: str, rounds=None):
+        """按多轮等待验证码（默认 5 分钟 + 10 分钟）"""
+        rounds = rounds or OTP_WAIT_ROUNDS
+        for idx, timeout in enumerate(rounds, start=1):
+            if idx > 1:
+                self._print(f"[OTP] 进入第 {idx} 轮等待 ({timeout}s)...")
+            code = self.wait_for_verification_email(email_addr, email_password, timeout=timeout)
+            if code:
+                return code
+        return None
+
     # ==================== 注册流程 ====================
 
     def visit_homepage(self):
@@ -1012,7 +1025,7 @@ class ChatGPTRegister:
 
         if need_otp:
             # 使用 Mailu 等待验证码
-            otp_code = self.wait_for_verification_email(email, mail_password, timeout=300)
+            otp_code = self.wait_for_otp_rounds(email, mail_password)
             if not otp_code:
                 raise Exception("未能获取验证码")
 
@@ -1022,7 +1035,7 @@ class ChatGPTRegister:
                 self._print("验证码失败，重试...")
                 self.send_otp()
                 _random_delay(1.0, 2.0)
-                otp_code = self.wait_for_verification_email(email, mail_password, timeout=180)
+                otp_code = self.wait_for_otp_rounds(email, mail_password)
                 if not otp_code:
                     raise Exception("重试后仍未获取验证码")
                 _random_delay(0.3, 0.8)
@@ -1525,58 +1538,64 @@ class ChatGPTRegister:
             headers_otp = _oauth_json_headers(f"{OAUTH_ISSUER}/email-verification")
             tried_codes = set()
             otp_success = False
-            otp_deadline = time.time() + 300
+            for round_idx, round_timeout in enumerate(OTP_WAIT_ROUNDS, start=1):
+                round_deadline = time.time() + round_timeout
+                if round_idx > 1:
+                    self._print(f"[OAuth] 进入第 {round_idx} 轮等待 ({round_timeout}s)...")
 
-            while time.time() < otp_deadline and not otp_success:
-                candidate_codes = []
+                while time.time() < round_deadline and not otp_success:
+                    candidate_codes = []
 
-                texts = self._fetch_recent_mail_texts(email, mail_password, limit=12)
-                for content in texts:
-                    code = self._extract_verification_code(content)
-                    if code and code not in tried_codes:
-                        candidate_codes.append(code)
+                    texts = self._fetch_recent_mail_texts(email, mail_password, limit=12)
+                    for content in texts:
+                        code = self._extract_verification_code(content)
+                        if code and code not in tried_codes:
+                            candidate_codes.append(code)
 
-                if not candidate_codes:
-                    elapsed = int(300 - max(0, otp_deadline - time.time()))
-                    self._print(f"[OAuth] OTP 等待中... ({elapsed}s/300s)")
-                    time.sleep(2)
-                    continue
-
-                for otp_code in candidate_codes:
-                    tried_codes.add(otp_code)
-                    self._print(f"[OAuth] 尝试 OTP: {otp_code}")
-                    try:
-                        resp_otp = self.session.post(
-                            f"{OAUTH_ISSUER}/api/accounts/email-otp/validate",
-                            json={"code": otp_code},
-                            headers=headers_otp,
-                            timeout=30,
-                            allow_redirects=False,
-                            impersonate=self.impersonate,
-                        )
-                    except Exception as e:
-                        self._print(f"[OAuth] email-otp/validate 异常: {e}")
+                    if not candidate_codes:
+                        elapsed = int(round_timeout - max(0, round_deadline - time.time()))
+                        self._print(f"[OAuth] OTP 等待中... ({elapsed}s/{round_timeout}s)")
+                        time.sleep(2)
                         continue
 
-                    self._print(f"[OAuth] /email-otp/validate -> {resp_otp.status_code}")
-                    if resp_otp.status_code != 200:
-                        self._print(f"[OAuth] OTP 无效，继续尝试下一条: {resp_otp.text[:160]}")
-                        continue
+                    for otp_code in candidate_codes:
+                        tried_codes.add(otp_code)
+                        self._print(f"[OAuth] 尝试 OTP: {otp_code}")
+                        try:
+                            resp_otp = self.session.post(
+                                f"{OAUTH_ISSUER}/api/accounts/email-otp/validate",
+                                json={"code": otp_code},
+                                headers=headers_otp,
+                                timeout=30,
+                                allow_redirects=False,
+                                impersonate=self.impersonate,
+                            )
+                        except Exception as e:
+                            self._print(f"[OAuth] email-otp/validate 异常: {e}")
+                            continue
 
-                    try:
-                        otp_data = resp_otp.json()
-                    except Exception:
-                        self._print("[OAuth] email-otp/validate 响应解析失败")
-                        continue
+                        self._print(f"[OAuth] /email-otp/validate -> {resp_otp.status_code}")
+                        if resp_otp.status_code != 200:
+                            self._print(f"[OAuth] OTP 无效，继续尝试下一条: {resp_otp.text[:160]}")
+                            continue
 
-                    continue_url = otp_data.get("continue_url", "") or continue_url
-                    page_type = (otp_data.get("page") or {}).get("type", "") or page_type
-                    self._print(f"[OAuth] OTP 验证通过 page={page_type or '-'} next={(continue_url or '-')[:140]}")
-                    otp_success = True
+                        try:
+                            otp_data = resp_otp.json()
+                        except Exception:
+                            self._print("[OAuth] email-otp/validate 响应解析失败")
+                            continue
+
+                        continue_url = otp_data.get("continue_url", "") or continue_url
+                        page_type = (otp_data.get("page") or {}).get("type", "") or page_type
+                        self._print(f"[OAuth] OTP 验证通过 page={page_type or '-'} next={(continue_url or '-')[:140]}")
+                        otp_success = True
+                        break
+
+                    if not otp_success:
+                        time.sleep(2)
+
+                if otp_success:
                     break
-
-                if not otp_success:
-                    time.sleep(2)
 
             if not otp_success:
                 self._print(f"[OAuth] OAuth 阶段 OTP 验证失败，已尝试 {len(tried_codes)} 个验证码")

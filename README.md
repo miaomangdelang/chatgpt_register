@@ -84,6 +84,19 @@ export MAILU_API_TOKEN="你的 Mailu API Token"
 TOTAL_ACCOUNTS=10 MAX_WORKERS=3 ./scripts/batch_register.sh
 ```
 
+## 自动任务（定时）
+
+`scripts/auto_register_25.sh` 会读取本地私密配置：
+
+- `.secrets/mailu.env`  
+  - `MAILU_API_TOKEN=...`
+- `.secrets/telegram.env`（用于结果通知）
+  - `TELEGRAM_BOT_TOKEN=...`
+  - `TELEGRAM_CHAT_ID=...`
+  - `TELEGRAM_PROXY_URL=...`（可选）
+
+脚本内置运行锁，避免多次定时任务重叠执行。
+
 ## 输出
 
 注册成功的账号会保存到 `registered_accounts.txt`
