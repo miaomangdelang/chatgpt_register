@@ -19,7 +19,7 @@ MAX_WORKERS="${MAX_WORKERS:-5}"
 
 LOG_DIR="$ROOT_DIR/logs"
 mkdir -p "$LOG_DIR"
-TS="$(date +\"%Y%m%d_%H%M%S\")"
+TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/auto_register_${TS}.log"
 
 echo "[Auto] start: $(date)" | tee -a "$LOG_FILE"
