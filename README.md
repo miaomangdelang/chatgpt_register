@@ -77,6 +77,13 @@ python chatgpt_register.py
 
 程序会直接使用代码内硬编码代理：`http://192.168.1.101:7890`，不再读取 `config.json` 或环境变量，也不再交互询问。
 
+## 批量脚本（非交互）
+
+```bash
+export MAILU_API_TOKEN="你的 Mailu API Token"
+TOTAL_ACCOUNTS=10 MAX_WORKERS=3 ./scripts/batch_register.sh
+```
+
 ## 输出
 
 注册成功的账号会保存到 `registered_accounts.txt`
