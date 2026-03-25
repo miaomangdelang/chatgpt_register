@@ -77,6 +77,18 @@ python chatgpt_register.py
 
 程序会直接使用代码内硬编码代理：`http://192.168.1.101:7890`，不再读取 `config.json` 或环境变量，也不再交互询问。
 
+## 流程概览
+
+1. `auto_register_25.sh` 启动，调用 `batch_register.sh`
+2. 通过 Mailu API 创建邮箱账号
+3. ChatGPT 注册流程：访问首页 → 获取 CSRF → Signin → Authorize → Register → 发送 OTP → IMAP 取码 → 验证 OTP → Create Account → Callback
+4. OAuth 获取 Codex Token：/oauth/authorize → authorize/continue → password/verify → OAuth 邮箱 OTP → consent/workspace → /oauth/token
+5. 成功后写入 `codex_tokens/`、`ak.txt`、`rk.txt`、`registered_accounts.txt`
+6. CPA 上传改为每日 06:00（`scripts/cpa_upload_daily.sh`），仅上传过去 24 小时新增账号
+
+注意：注册阶段 OTP 与 OAuth 阶段 OTP 是两套独立验证码。
+
+
 ## 批量脚本（非交互）
 
 ```bash
@@ -99,6 +111,15 @@ TOTAL_ACCOUNTS=10 MAX_WORKERS=3 ./scripts/batch_register.sh
 
 `scripts/cpa_upload_daily.sh` 用于每天 06:00 上传过去 24 小时创建的账号到 CPA（从 codex_tokens），注册后不再即时上传。
 
+
+## 常见失败与定位
+
+- `0. Visit homepage` 超时或 403：代理/线路问题或被目标站点拦截
+- `curl (35) Recv failure`：连接被对端或中间节点重置
+- OAuth 阶段 `wrong_email_otp`：验证码不匹配，常见于旧验证码/新验证码未到
+- OAuth 阶段 `未获取到 authorization code`：consent/workspace 路径未返回 code
+
+建议先看日志里的 `Step`、`OAuth`、`OTP` 关键字定位阶段。
 
 ## 输出
 
