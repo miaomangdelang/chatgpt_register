@@ -12,6 +12,8 @@ import random
 import string
 import time
 import sys
+import shutil
+import subprocess
 import threading
 import traceback
 import secrets
@@ -19,6 +21,7 @@ import hashlib
 import base64
 import imaplib
 import email
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, urlencode
 
@@ -28,7 +31,7 @@ from curl_cffi import requests as curl_requests
 def _load_config():
     """从 config.json 加载配置，环境变量优先级更高"""
     config = {
-        "total_accounts": 3,
+        "total_accounts": 5,
         "mailu_base_url": "https://mail.oracle.311200.xyz",
         "mailu_api_token": "",
         "mail_domain": "oracle.311200.xyz",
@@ -38,7 +41,7 @@ def _load_config():
         "imap_ssl": True,
         "imap_folder": "INBOX",
         "imap_timeout": 20,
-        "proxy": "",
+        "proxy": "http://192.168.1.137:7890",
         "output_file": "registered_accounts.txt",
         "enable_oauth": True,
         "oauth_required": True,
@@ -50,6 +53,15 @@ def _load_config():
         "token_json_dir": "codex_tokens",
         "upload_api_url": "",
         "upload_api_token": "",
+        "log_file": "logs/register.log",
+        "openclaw_bin": "/home/joing/.npm-global/bin/openclaw",
+        "tg_channel": "telegram",
+        "tg_target": "1014334465",
+        "tg_account": "AUSUbot",
+        "tg_notify": True,
+        "tg_include_account": True,
+        "openai_proxy": "",
+        "openai_proxy_mode": "inherit",
     }
 
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -83,6 +95,15 @@ def _load_config():
     config["token_json_dir"] = os.environ.get("TOKEN_JSON_DIR", config["token_json_dir"])
     config["upload_api_url"] = os.environ.get("UPLOAD_API_URL", config["upload_api_url"])
     config["upload_api_token"] = os.environ.get("UPLOAD_API_TOKEN", config["upload_api_token"])
+    config["log_file"] = os.environ.get("REGISTER_LOG_FILE", config["log_file"])
+    config["openclaw_bin"] = os.environ.get("OPENCLAW_BIN", config["openclaw_bin"])
+    config["tg_channel"] = os.environ.get("TG_CHANNEL", config["tg_channel"])
+    config["tg_target"] = os.environ.get("TG_TARGET", config["tg_target"])
+    config["tg_account"] = os.environ.get("TG_ACCOUNT", config["tg_account"])
+    config["tg_notify"] = os.environ.get("TG_NOTIFY", config["tg_notify"])
+    config["tg_include_account"] = os.environ.get("TG_INCLUDE_ACCOUNT", config["tg_include_account"])
+    config["openai_proxy"] = os.environ.get("OPENAI_PROXY", config["openai_proxy"])
+    config["openai_proxy_mode"] = os.environ.get("OPENAI_PROXY_MODE", config["openai_proxy_mode"])
 
     return config
 
@@ -95,6 +116,7 @@ def _as_bool(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG = _load_config()
 MAILU_BASE_URL = _CONFIG["mailu_base_url"].rstrip("/")
 MAILU_API_TOKEN = _CONFIG["mailu_api_token"]
@@ -118,11 +140,369 @@ RK_FILE = _CONFIG["rk_file"]
 TOKEN_JSON_DIR = _CONFIG["token_json_dir"]
 UPLOAD_API_URL = _CONFIG["upload_api_url"]
 UPLOAD_API_TOKEN = _CONFIG["upload_api_token"]
+LOG_FILE = (_CONFIG.get("log_file") or "").strip()
+if LOG_FILE and not os.path.isabs(LOG_FILE):
+    LOG_FILE = os.path.join(BASE_DIR, LOG_FILE)
+OPENCLAW_BIN = (_CONFIG.get("openclaw_bin") or "").strip()
+TG_CHANNEL = (_CONFIG.get("tg_channel") or "telegram").strip()
+TG_TARGET = (_CONFIG.get("tg_target") or "").strip()
+TG_ACCOUNT = (_CONFIG.get("tg_account") or "").strip()
+TG_NOTIFY = _as_bool(_CONFIG.get("tg_notify", True))
+TG_INCLUDE_ACCOUNT = _as_bool(_CONFIG.get("tg_include_account", True))
+OPENAI_PROXY = (_CONFIG.get("openai_proxy") or "").strip()
+OPENAI_PROXY_MODE = (_CONFIG.get("openai_proxy_mode") or "inherit").strip().lower()
 
-# 代理固定值（不再读取 config/env）
-FIXED_PROXY = "http://192.168.1.101:7890"
+# 代理固定值（默认仍使用固定代理；可通过环境变量关闭）
+FIXED_PROXY = os.environ.get("FIXED_PROXY", "http://192.168.1.137:7890").strip()
+USE_FIXED_PROXY = _as_bool(os.environ.get("USE_FIXED_PROXY", "true"))
+ACTIVE_PROXY = None
 # OTP 等待轮次（秒）：5 分钟 + 10 分钟
 OTP_WAIT_ROUNDS = [300, 600]
+
+# 风控探测配置
+RISK_THRESHOLD = int(os.environ.get("RISK_THRESHOLD", "3"))
+_DEFAULT_RISK_KEYWORDS = [
+    "risk",
+    "suspicious",
+    "unusual activity",
+    "abuse",
+    "blocked",
+    "forbidden",
+    "denied",
+    "access denied",
+    "too many requests",
+    "rate limit",
+    "rate_limit",
+    "captcha",
+    "hcaptcha",
+    "arkose",
+    "cloudflare",
+    "cf-chl",
+    "account locked",
+    "temporarily locked",
+    "account suspended",
+    "bot",
+    "automated",
+    "风控",
+    "风险",
+    "异常行为",
+    "访问被拒绝",
+    "请求过多",
+    "请求过于频繁",
+    "封禁",
+    "冻结",
+    "限制访问",
+    "账号异常",
+]
+_RISK_KEYWORDS_ENV = os.environ.get("RISK_KEYWORDS", "").strip()
+if _RISK_KEYWORDS_ENV:
+    RISK_KEYWORDS = [k.strip().lower() for k in _RISK_KEYWORDS_ENV.split(",") if k.strip()]
+else:
+    RISK_KEYWORDS = [k.lower() for k in _DEFAULT_RISK_KEYWORDS]
+_RISK_STATUSES_ENV = os.environ.get("RISK_STATUSES", "403,429").strip()
+RISK_STATUSES = set()
+for _code in _RISK_STATUSES_ENV.split(","):
+    _code = _code.strip()
+    if _code.isdigit():
+        RISK_STATUSES.add(int(_code))
+
+
+def _resolve_proxy():
+    if USE_FIXED_PROXY and FIXED_PROXY:
+        return FIXED_PROXY
+    for key in ("PROXY", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        val = os.environ.get(key)
+        if val:
+            return val
+    if DEFAULT_PROXY:
+        return DEFAULT_PROXY
+    return ""
+
+
+def _set_active_proxy(proxy):
+    global ACTIVE_PROXY
+    ACTIVE_PROXY = proxy or ""
+
+
+def _get_active_proxy():
+    if ACTIVE_PROXY:
+        return ACTIVE_PROXY
+    return _resolve_proxy()
+
+
+def _resolve_openai_proxy(base_proxy: str):
+    mode = (OPENAI_PROXY_MODE or "inherit").strip().lower()
+    if mode in {"direct", "none", "off"}:
+        return ""
+    if mode in {"proxy", "force"}:
+        return (OPENAI_PROXY or base_proxy or "").strip()
+    return (OPENAI_PROXY or base_proxy or "").strip()
+
+
+def _is_local_hostname(hostname: str) -> bool:
+    if not hostname:
+        return False
+    host = hostname.strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host == "localhost" or host == "::1" or host.startswith("127.")
+
+
+def _resolve_upload_proxy(upload_url: str) -> str:
+    """为上传接口选择代理；本地地址默认直连。"""
+    if "UPLOAD_PROXY" in os.environ:
+        return os.environ.get("UPLOAD_PROXY", "").strip()
+    if "UPLOAD_API_PROXY" in os.environ:
+        return os.environ.get("UPLOAD_API_PROXY", "").strip()
+    try:
+        host = urlparse(upload_url).hostname
+    except Exception:
+        host = None
+    if host and _is_local_hostname(host):
+        return ""
+    return _get_active_proxy()
+
+
+def _count_file_lines(path: str) -> int:
+    if not path:
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+
+def _get_last_new_line(path: str, start_line: int):
+    if not path:
+        return "", 0
+    last_line = ""
+    new_count = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for idx, line in enumerate(f, start=1):
+                if idx <= start_line:
+                    continue
+                new_count += 1
+                last_line = line.strip()
+    except Exception:
+        return "", 0
+    return last_line, new_count
+
+
+def _resolve_openclaw_bin() -> str:
+    candidate = (OPENCLAW_BIN or "").strip()
+    if not candidate:
+        return ""
+    if os.path.isabs(candidate):
+        return candidate if os.path.exists(candidate) else ""
+    found = shutil.which(candidate)
+    return found or ""
+
+
+def _send_openclaw_message(message: str) -> bool:
+    if not TG_NOTIFY:
+        return False
+    if not message:
+        return False
+    target = (TG_TARGET or "").strip()
+    if not target:
+        return False
+    bin_path = _resolve_openclaw_bin()
+    if not bin_path:
+        return False
+    cmd = [bin_path, "message", "send"]
+    if TG_ACCOUNT:
+        cmd += ["--account", TG_ACCOUNT]
+    cmd += ["--channel", TG_CHANNEL or "telegram", "--target", target, "--message", message]
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return True
+    except Exception:
+        return False
+
+
+def _send_error_notification(index, total, email, error_msg, step_info=None):
+    if not TG_NOTIFY:
+        return False
+    msg = (error_msg or "").strip()
+    if len(msg) > 1600:
+        msg = msg[:1600] + "..."
+    lines = [
+        "ChatGPT 注册失败",
+        f"时间: {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}",
+        f"账号: {index}/{total}",
+        f"邮箱: {email or '-'}",
+        f"疑似风控: {'是' if _is_risk_error(error_msg or '') else '否'}",
+        f"错误: {msg or '-'}",
+    ]
+    if step_info:
+        step = step_info.get("step") or "-"
+        status = step_info.get("status")
+        method = step_info.get("method") or "-"
+        url = step_info.get("url") or "-"
+        lines.append(f"Step: {step}")
+        if status is not None:
+            lines.append(f"Status: {status}")
+        lines.append(f"Request: {method} {url}")
+        body_preview = (step_info.get("body_preview") or "").strip()
+        if body_preview:
+            if len(body_preview) > 500:
+                body_preview = body_preview[:500] + "..."
+            lines.append(f"Response: {body_preview}")
+    return _send_openclaw_message("\n".join(lines))
+
+
+def _send_success_notification(index, total, email):
+    if not TG_NOTIFY:
+        return False
+    lines = [
+        "ChatGPT 注册成功",
+        f"时间: {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}",
+        f"账号: {index}/{total}",
+        f"邮箱: {email or '-'}",
+    ]
+    return _send_openclaw_message("\n".join(lines))
+
+
+def _append_log(event: str, message: str, **fields):
+    if not LOG_FILE:
+        return
+    payload = {
+        "time": datetime.now().astimezone().isoformat(),
+        "event": event,
+        "message": message,
+    }
+    payload.update(fields)
+    try:
+        log_dir = os.path.dirname(LOG_FILE)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False))
+                f.write("\n")
+    except Exception:
+        # 日志写入失败不应影响主流程
+        pass
+
+
+def _extract_status_code(error_msg: str):
+    if not error_msg:
+        return None
+    m = re.search(r"\((\d{3})\)", error_msg)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    m = re.search(r'"status"\s*:\s*(\d{3})', error_msg)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    m = re.search(r"\bstatus\s*=\s*(\d{3})\b", error_msg)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    return None
+
+
+def _is_risk_error(error_msg: str) -> bool:
+    if not error_msg:
+        return False
+    status = _extract_status_code(error_msg)
+    if status in RISK_STATUSES:
+        return True
+    msg = error_msg.lower()
+    for kw in RISK_KEYWORDS:
+        if kw and kw in msg:
+            return True
+    return False
+
+
+def _iter_log_events(log_path: str):
+    if not log_path or not os.path.exists(log_path):
+        return
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except Exception:
+                    continue
+    except Exception:
+        return
+
+
+def _get_last_batch_summary(log_path: str):
+    events = list(_iter_log_events(log_path) or [])
+    if not events:
+        return None
+    last_start_idx = None
+    for i in range(len(events) - 1, -1, -1):
+        if events[i].get("event") == "batch_start":
+            last_start_idx = i
+            break
+    if last_start_idx is None:
+        return None
+    batch_events = events[last_start_idx:]
+    batch_time = None
+    for ev in reversed(batch_events):
+        ts = ev.get("time")
+        if ts:
+            try:
+                batch_time = datetime.fromisoformat(ts).astimezone()
+                break
+            except Exception:
+                batch_time = None
+                break
+    risk_count = None
+    for ev in reversed(batch_events):
+        if ev.get("event") == "batch_end" and "risk" in ev:
+            try:
+                risk_count = int(ev.get("risk", 0))
+            except Exception:
+                risk_count = 0
+            break
+    if risk_count is None:
+        risk_count = 0
+        for ev in batch_events:
+            if ev.get("event") != "register_fail":
+                continue
+            risk_flag = ev.get("risk")
+            if risk_flag is None:
+                risk_flag = _is_risk_error(ev.get("error", "") or "")
+            if risk_flag:
+                risk_count += 1
+    return {
+        "time": batch_time,
+        "risk_count": risk_count,
+    }
+
+
+def _should_skip_today_due_to_risk(log_path: str, threshold: int):
+    if not log_path:
+        return None
+    summary = _get_last_batch_summary(log_path)
+    if not summary:
+        return None
+    batch_time = summary.get("time")
+    if not batch_time:
+        return None
+    today = datetime.now().astimezone().date()
+    if batch_time.date() != today:
+        return None
+    risk_count = int(summary.get("risk_count", 0) or 0)
+    if risk_count >= threshold:
+        return summary
+    return None
 
 if not MAILU_API_TOKEN:
     print("⚠️ 警告: 未设置 MAILU_API_TOKEN，请在 config.json 中设置或设置环境变量")
@@ -132,6 +512,26 @@ if not MAILU_API_TOKEN:
 # 全局线程锁
 _print_lock = threading.Lock()
 _file_lock = threading.Lock()
+_log_lock = threading.Lock()
+_risk_lock = threading.Lock()
+_risk_count = 0
+
+
+def _reset_risk_counter():
+    global _risk_count
+    with _risk_lock:
+        _risk_count = 0
+
+
+def _increment_risk_counter():
+    global _risk_count
+    with _risk_lock:
+        _risk_count += 1
+
+
+def _get_risk_counter():
+    with _risk_lock:
+        return _risk_count
 
 
 # Chrome 指纹配置: impersonate 与 sec-ch-ua 必须匹配真实浏览器
@@ -443,6 +843,14 @@ def _save_codex_tokens(email: str, tokens: dict):
     with _file_lock:
         with open(token_path, "w", encoding="utf-8") as f:
             json.dump(token_data, f, ensure_ascii=False)
+    _append_log(
+        "token_saved",
+        "token json saved",
+        email=email,
+        token_path=token_path,
+        account_id=account_id,
+        expired=expired_str,
+    )
 
     # 上传到 CPA 管理平台
     if UPLOAD_API_URL:
@@ -452,7 +860,15 @@ def _save_codex_tokens(email: str, tokens: dict):
 def _upload_token_json(filepath):
     """上传 Token JSON 文件到 CPA 管理平台"""
     mp = None
+    upload_proxy = _resolve_upload_proxy(UPLOAD_API_URL)
     try:
+        _append_log(
+            "token_upload_start",
+            "uploading token json to CPA",
+            file=filepath,
+            upload_api_url=UPLOAD_API_URL,
+            proxy=upload_proxy,
+        )
         from curl_cffi import CurlMime
 
         filename = os.path.basename(filepath)
@@ -465,8 +881,8 @@ def _upload_token_json(filepath):
         )
 
         session = curl_requests.Session()
-        if DEFAULT_PROXY:
-            session.proxies = {"http": DEFAULT_PROXY, "https": DEFAULT_PROXY}
+        if upload_proxy:
+            session.proxies = {"http": upload_proxy, "https": upload_proxy}
 
         resp = session.post(
             UPLOAD_API_URL,
@@ -479,12 +895,31 @@ def _upload_token_json(filepath):
         if resp.status_code == 200:
             with _print_lock:
                 print(f"  [CPA] Token JSON 已上传到 CPA 管理平台")
+            _append_log(
+                "token_upload_ok",
+                "token json uploaded",
+                file=filepath,
+                status_code=resp.status_code,
+            )
         else:
             with _print_lock:
                 print(f"  [CPA] 上传失败: {resp.status_code} - {resp.text[:200]}")
+            _append_log(
+                "token_upload_fail",
+                "token json upload failed",
+                file=filepath,
+                status_code=resp.status_code,
+                error=resp.text[:200],
+            )
     except Exception as e:
         with _print_lock:
             print(f"  [CPA] 上传异常: {e}")
+        _append_log(
+            "token_upload_error",
+            "token json upload exception",
+            file=filepath,
+            error=str(e),
+        )
     finally:
         if mp:
             mp.close()
@@ -709,8 +1144,9 @@ class ChatGPTRegister:
     BASE = "https://chatgpt.com"
     AUTH = "https://auth.openai.com"
 
-    def __init__(self, proxy: str = None, tag: str = ""):
+    def __init__(self, proxy: str = None, openai_proxy: str = None, tag: str = ""):
         self.tag = tag  # 线程标识，用于日志
+        self.last_http_step = None
         self.device_id = str(uuid.uuid4())
         self.auth_session_logging_id = str(uuid.uuid4())
         self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _random_chrome_version()
@@ -718,8 +1154,9 @@ class ChatGPTRegister:
         self.session = curl_requests.Session(impersonate=self.impersonate)
 
         self.proxy = proxy
-        if self.proxy:
-            self.session.proxies = {"http": self.proxy, "https": self.proxy}
+        self.openai_proxy = openai_proxy if openai_proxy is not None else proxy
+        if self.openai_proxy:
+            self.session.proxies = {"http": self.openai_proxy, "https": self.openai_proxy}
 
         self.session.headers.update({
             "User-Agent": self.ua,
@@ -753,6 +1190,30 @@ class ChatGPTRegister:
         lines.append(f"{'='*60}")
         with _print_lock:
             print("\n".join(lines))
+        if body is None:
+            body_preview = ""
+        else:
+            try:
+                body_preview = json.dumps(body, ensure_ascii=False)[:200]
+            except Exception:
+                body_preview = str(body)[:200]
+        _append_log(
+            "http_step",
+            "http step finished",
+            tag=self.tag,
+            step=step,
+            method=method,
+            url=url,
+            status=status,
+            body_preview=body_preview,
+        )
+        self.last_http_step = {
+            "step": step,
+            "method": method,
+            "url": url,
+            "status": status,
+            "body_preview": body_preview,
+        }
 
     def _print(self, msg):
         prefix = f"[{self.tag}] " if self.tag else ""
@@ -1095,6 +1556,11 @@ class ChatGPTRegister:
         return None
 
     def _oauth_allow_redirect_extract_code(self, url: str, referer: str = None):
+        code = _extract_code_from_url(url)
+        if code:
+            self._print("[OAuth] allow_redirect 命中初始 URL code")
+            return code
+
         headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Upgrade-Insecure-Requests": "1",
@@ -1139,6 +1605,11 @@ class ChatGPTRegister:
         return None
 
     def _oauth_follow_for_code(self, start_url: str, referer: str = None, max_hops: int = 16):
+        code = _extract_code_from_url(start_url)
+        if code:
+            self._print("[OAuth] follow[0] 命中初始 URL code")
+            return code, start_url
+
         headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Upgrade-Insecure-Requests": "1",
@@ -1359,6 +1830,36 @@ class ChatGPTRegister:
             h.update(_make_trace_headers())
             return h
 
+        def _cookie_snapshot(label: str, resp=None):
+            try:
+                cookies = []
+                for c in self.session.cookies:
+                    name = getattr(c, "name", "") or ""
+                    domain = getattr(c, "domain", "") or ""
+                    if name:
+                        cookies.append(f"{name}@{domain}")
+                cookies = sorted(set(cookies))
+                has_login = any(item.startswith("login_session@") or item.startswith("login_session") for item in cookies)
+                _append_log(
+                    "oauth_cookie_snapshot",
+                    "oauth cookie snapshot",
+                    label=label,
+                    cookie_count=len(cookies),
+                    has_login_session=has_login,
+                    cookies=cookies[:60],
+                )
+                if resp is not None:
+                    set_cookie = resp.headers.get("set-cookie", "")
+                    if set_cookie:
+                        _append_log(
+                            "oauth_set_cookie",
+                            "oauth set-cookie header seen",
+                            label=label,
+                            header=set_cookie[:400],
+                        )
+            except Exception:
+                pass
+
         def _bootstrap_oauth_session():
             self._print("[OAuth] 1/7 GET /oauth/authorize")
             try:
@@ -1381,6 +1882,7 @@ class ChatGPTRegister:
             final_url = str(r.url)
             redirects = len(getattr(r, "history", []) or [])
             self._print(f"[OAuth] /oauth/authorize -> {r.status_code}, final={(final_url or '-')[:140]}, redirects={redirects}")
+            _cookie_snapshot("after_oauth_authorize", r)
 
             has_login = any(getattr(c, "name", "") == "login_session" for c in self.session.cookies)
             self._print(f"[OAuth] login_session: {'已获取' if has_login else '未获取'}")
@@ -1405,11 +1907,46 @@ class ChatGPTRegister:
                     final_url = str(r2.url)
                     redirects2 = len(getattr(r2, "history", []) or [])
                     self._print(f"[OAuth] /api/oauth/oauth2/auth -> {r2.status_code}, final={(final_url or '-')[:140]}, redirects={redirects2}")
+                    _cookie_snapshot("after_oauth2_auth", r2)
                 except Exception as e:
                     self._print(f"[OAuth] /api/oauth/oauth2/auth 异常: {e}")
 
                 has_login = any(getattr(c, "name", "") == "login_session" for c in self.session.cookies)
                 self._print(f"[OAuth] login_session(重试): {'已获取' if has_login else '未获取'}")
+
+            if not has_login:
+                self._print("[OAuth] login_session 仍缺失，尝试 /api/accounts/authorize 引导")
+                auth_params = dict(authorize_params)
+                auth_params.update({
+                    "prompt": "login",
+                    "screen_hint": "login",
+                    "device_id": self.device_id,
+                    "ext-oai-did": self.device_id,
+                    "auth_session_logging_id": self.auth_session_logging_id,
+                    "audience": "https://api.openai.com/v1",
+                })
+                try:
+                    r3 = self.session.get(
+                        f"{OAUTH_ISSUER}/api/accounts/authorize?{urlencode(auth_params)}",
+                        headers={
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                            "Referer": authorize_url,
+                            "Upgrade-Insecure-Requests": "1",
+                            "User-Agent": self.ua,
+                        },
+                        allow_redirects=True,
+                        timeout=30,
+                        impersonate=self.impersonate,
+                    )
+                    final_url = str(r3.url)
+                    redirects3 = len(getattr(r3, "history", []) or [])
+                    self._print(f"[OAuth] /api/accounts/authorize -> {r3.status_code}, final={(final_url or '-')[:140]}, redirects={redirects3}")
+                    _cookie_snapshot("after_api_accounts_authorize", r3)
+                except Exception as e:
+                    self._print(f"[OAuth] /api/accounts/authorize 异常: {e}")
+
+                has_login = any(getattr(c, "name", "") == "login_session" for c in self.session.cookies)
+                self._print(f"[OAuth] login_session(最终): {'已获取' if has_login else '未获取'}")
 
             return has_login, final_url
 
@@ -1479,38 +2016,67 @@ class ChatGPTRegister:
         page_type = (continue_data.get("page") or {}).get("type", "")
         self._print(f"[OAuth] continue page={page_type or '-'} next={(continue_url or '-')[:140]}")
 
-        self._print("[OAuth] 3/7 POST /api/accounts/password/verify")
-        sentinel_pwd = build_sentinel_token(
-            self.session,
-            self.device_id,
-            flow="password_verify",
-            user_agent=self.ua,
-            sec_ch_ua=self.sec_ch_ua,
-            impersonate=self.impersonate,
-        )
-        if not sentinel_pwd:
-            self._print("[OAuth] password_verify 的 sentinel token 获取失败")
-            return None
-
-        headers_verify = _oauth_json_headers(f"{OAUTH_ISSUER}/log-in/password")
-        headers_verify["openai-sentinel-token"] = sentinel_pwd
-
-        try:
-            resp_verify = self.session.post(
-                f"{OAUTH_ISSUER}/api/accounts/password/verify",
-                json={"password": password},
-                headers=headers_verify,
-                timeout=30,
-                allow_redirects=False,
+        resp_verify = None
+        for attempt in range(1, 3):
+            self._print("[OAuth] 3/7 POST /api/accounts/password/verify")
+            sentinel_pwd = build_sentinel_token(
+                self.session,
+                self.device_id,
+                flow="password_verify",
+                user_agent=self.ua,
+                sec_ch_ua=self.sec_ch_ua,
                 impersonate=self.impersonate,
             )
-        except Exception as e:
-            self._print(f"[OAuth] password/verify 异常: {e}")
+            if not sentinel_pwd:
+                self._print("[OAuth] password_verify 的 sentinel token 获取失败")
+                return None
+
+            headers_verify = _oauth_json_headers(f"{OAUTH_ISSUER}/log-in/password")
+            headers_verify["openai-sentinel-token"] = sentinel_pwd
+
+            try:
+                resp_verify = self.session.post(
+                    f"{OAUTH_ISSUER}/api/accounts/password/verify",
+                    json={"password": password},
+                    headers=headers_verify,
+                    timeout=30,
+                    allow_redirects=False,
+                    impersonate=self.impersonate,
+                )
+            except Exception as e:
+                self._print(f"[OAuth] password/verify 异常: {e}")
+                return None
+
+            self._print(f"[OAuth] /password/verify -> {resp_verify.status_code}")
+            if resp_verify.status_code == 200:
+                break
+
+            self._print(f"[OAuth] 密码校验失败: {resp_verify.text[:180]}")
+            if resp_verify.status_code == 401 and attempt == 1:
+                self._print("[OAuth] 401，尝试重新 bootstrap 并重试一次")
+                has_login_session, authorize_final_url = _bootstrap_oauth_session()
+                if not authorize_final_url:
+                    return None
+                continue_referer = authorize_final_url if authorize_final_url.startswith(OAUTH_ISSUER) else f"{OAUTH_ISSUER}/log-in"
+                resp_continue = _post_authorize_continue(continue_referer)
+                if resp_continue is None:
+                    return None
+                self._print(f"[OAuth] /authorize/continue(重试后) -> {resp_continue.status_code}")
+                if resp_continue.status_code != 200:
+                    self._print(f"[OAuth] 邮箱提交失败(重试后): {resp_continue.text[:180]}")
+                    return None
+                try:
+                    continue_data = resp_continue.json()
+                except Exception:
+                    self._print("[OAuth] authorize/continue 响应解析失败(重试后)")
+                    return None
+                continue_url = continue_data.get("continue_url", "")
+                page_type = (continue_data.get("page") or {}).get("type", "")
+                self._print(f"[OAuth] continue page(重试)={page_type or '-'} next={(continue_url or '-')[:140]}")
+                continue
             return None
 
-        self._print(f"[OAuth] /password/verify -> {resp_verify.status_code}")
-        if resp_verify.status_code != 200:
-            self._print(f"[OAuth] 密码校验失败: {resp_verify.text[:180]}")
+        if resp_verify is None or resp_verify.status_code != 200:
             return None
 
         try:
@@ -1678,15 +2244,32 @@ class ChatGPTRegister:
 
 # ==================== 并发批量注册 ====================
 
-def _register_one(idx, total, proxy, output_file):
+def _register_one(idx, total, proxy, openai_proxy, output_file):
     """单个注册任务 (在线程中运行) - 使用 Mailu 邮箱"""
     reg = None
+    email = None
+    email_pwd = None
     try:
-        reg = ChatGPTRegister(proxy=proxy, tag=f"{idx}")
+        _append_log(
+            "register_start",
+            "register task started",
+            index=idx,
+            total=total,
+            proxy=proxy,
+            openai_proxy=openai_proxy,
+            output_file=output_file,
+        )
+        reg = ChatGPTRegister(proxy=proxy, openai_proxy=openai_proxy, tag=f"{idx}")
 
         # 1. 创建 Mailu 邮箱
         reg._print("[Mailu] 创建邮箱...")
         email, email_pwd = reg.create_temp_email()
+        _append_log(
+            "mailu_create_ok",
+            "mailbox created",
+            index=idx,
+            email=email,
+        )
         tag = email.split("@")[0]
         reg.tag = tag  # 更新 tag
 
@@ -1704,6 +2287,12 @@ def _register_one(idx, total, proxy, output_file):
 
         # 2. 执行注册流程
         reg.run_register(email, chatgpt_password, name, birthdate, email_pwd)
+        _append_log(
+            "register_flow_ok",
+            "registration flow completed",
+            index=idx,
+            email=email,
+        )
 
         # 3. OAuth（可选）
         oauth_ok = True
@@ -1714,11 +2303,29 @@ def _register_one(idx, total, proxy, output_file):
             if oauth_ok:
                 _save_codex_tokens(email, tokens)
                 reg._print("[OAuth] Token 已保存")
+                _append_log(
+                    "oauth_token_ok",
+                    "oauth token acquired",
+                    index=idx,
+                    email=email,
+                )
             else:
                 msg = "OAuth 获取失败"
                 if OAUTH_REQUIRED:
+                    _append_log(
+                        "oauth_token_fail",
+                        "oauth token required but failed",
+                        index=idx,
+                        email=email,
+                    )
                     raise Exception(f"{msg}（oauth_required=true）")
                 reg._print(f"[OAuth] {msg}（按配置继续）")
+                _append_log(
+                    "oauth_token_fail",
+                    "oauth token failed but continued",
+                    index=idx,
+                    email=email,
+                )
 
         # 4. 线程安全写入结果
         with _file_lock:
@@ -1727,25 +2334,74 @@ def _register_one(idx, total, proxy, output_file):
 
         with _print_lock:
             print(f"\n[OK] [{tag}] {email} 注册成功!")
+        _append_log(
+            "register_success",
+            "registration succeeded",
+            index=idx,
+            email=email,
+            oauth_ok=oauth_ok,
+        )
+        _send_success_notification(idx, total, email)
         return True, email, None
 
     except Exception as e:
         error_msg = str(e)
+        risk_flag = _is_risk_error(error_msg)
+        if risk_flag:
+            _increment_risk_counter()
         with _print_lock:
             print(f"\n[FAIL] [{idx}] 注册失败: {error_msg}")
             traceback.print_exc()
+        _append_log(
+            "register_fail",
+            "registration failed",
+            index=idx,
+            error=error_msg,
+            risk=risk_flag,
+        )
+        step_info = reg.last_http_step if reg else None
+        _send_error_notification(idx, total, email, error_msg, step_info=step_info)
         return False, None, error_msg
 
 
-def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
-              max_workers=3, proxy=None):
+def run_batch(total_accounts: int = DEFAULT_TOTAL_ACCOUNTS, output_file="registered_accounts.txt",
+              max_workers=1, proxy=None, openai_proxy=None):
     """并发批量注册 - Mailu 邮箱版"""
 
     if not MAILU_API_TOKEN:
         print("❌ 错误: 未设置 MAILU_API_TOKEN 环境变量")
         print("   请设置: export MAILU_API_TOKEN='your_api_key_here'")
         print("   或: set MAILU_API_TOKEN=your_api_key_here (Windows)")
-        return
+        _append_log(
+            "batch_abort",
+            "missing MAILU_API_TOKEN",
+            total_accounts=total_accounts,
+            max_workers=max_workers,
+        )
+        return 0, 0
+
+    _set_active_proxy(proxy)
+    if openai_proxy is None:
+        openai_proxy = _resolve_openai_proxy(proxy)
+    _reset_risk_counter()
+    output_start_lines = _count_file_lines(output_file)
+    _append_log(
+        "batch_start",
+        "batch registration started",
+        total_accounts=total_accounts,
+        max_workers=max_workers,
+        proxy=_get_active_proxy(),
+        openai_proxy=openai_proxy,
+        output_file=output_file,
+        mailu_base_url=MAILU_BASE_URL,
+        mail_domain=MAIL_DOMAIN,
+        imap_host=IMAP_HOST,
+        imap_port=IMAP_PORT,
+        oauth_enabled=ENABLE_OAUTH,
+        oauth_required=OAUTH_REQUIRED,
+        token_json_dir=TOKEN_JSON_DIR,
+        upload_api_url=UPLOAD_API_URL,
+    )
 
     actual_workers = min(max_workers, total_accounts)
     print(f"\n{'#'*60}")
@@ -1754,6 +2410,7 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
     print(f"  Mailu API: {MAILU_BASE_URL}")
     print(f"  Mail Domain: {MAIL_DOMAIN}")
     print(f"  IMAP: {IMAP_HOST}:{IMAP_PORT} | SSL: {'是' if IMAP_SSL else '否'}")
+    print(f"  OpenAI Proxy: {openai_proxy or '直连'} (mode={OPENAI_PROXY_MODE or 'inherit'})")
     print(f"  OAuth: {'开启' if ENABLE_OAUTH else '关闭'} | required: {'是' if OAUTH_REQUIRED else '否'}")
     if ENABLE_OAUTH:
         print(f"  OAuth Issuer: {OAUTH_ISSUER}")
@@ -1770,7 +2427,7 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
         futures = {}
         for idx in range(1, total_accounts + 1):
             future = executor.submit(
-                _register_one, idx, total_accounts, proxy, output_file
+                _register_one, idx, total_accounts, proxy, openai_proxy, output_file
             )
             futures[future] = idx
 
@@ -1790,19 +2447,79 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
 
     elapsed = time.time() - start_time
     avg = elapsed / total_accounts if total_accounts else 0
+    risk_count = _get_risk_counter()
     print(f"\n{'#'*60}")
     print(f"  注册完成! 耗时 {elapsed:.1f} 秒")
     print(f"  总数: {total_accounts} | 成功: {success_count} | 失败: {fail_count}")
+    print(f"  疑似风控: {risk_count} | 阈值: {RISK_THRESHOLD}")
     print(f"  平均速度: {avg:.1f} 秒/个")
     if success_count > 0:
         print(f"  结果文件: {output_file}")
     print(f"{'#'*60}")
+    _append_log(
+        "batch_end",
+        "batch registration finished",
+        total_accounts=total_accounts,
+        success=success_count,
+        failed=fail_count,
+        risk=risk_count,
+        risk_threshold=RISK_THRESHOLD,
+        elapsed_seconds=round(elapsed, 2),
+        avg_seconds=round(avg, 2),
+        output_file=output_file,
+    )
+
+    last_line, new_lines = _get_last_new_line(output_file, output_start_lines)
+    msg_lines = [
+        "ChatGPT 注册任务完成",
+        f"时间: {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}",
+        f"总数: {total_accounts} | 成功: {success_count} | 失败: {fail_count}",
+        f"疑似风控: {risk_count} | 阈值: {RISK_THRESHOLD}",
+        f"耗时: {elapsed:.1f} 秒",
+        f"退出码: {0 if success_count > 0 else 1}",
+    ]
+    proxy_used = _get_active_proxy()
+    if proxy_used:
+        msg_lines.append(f"代理: {proxy_used}")
+    if success_count > 0:
+        msg_lines.append(f"结果文件: {output_file}")
+    if TG_INCLUDE_ACCOUNT and new_lines > 0 and last_line:
+        msg_lines.append(f"账号: {last_line}")
+
+    notify_ok = _send_openclaw_message("\n".join(msg_lines))
+    _append_log(
+        "tg_notify_ok" if notify_ok else "tg_notify_skip",
+        "openclaw message sent" if notify_ok else "openclaw message skipped",
+        total_accounts=total_accounts,
+        success=success_count,
+        failed=fail_count,
+        target=TG_TARGET,
+        account=TG_ACCOUNT,
+    )
+    return success_count, fail_count
 
 
 def main():
     print("=" * 60)
     print("  ChatGPT 批量自动注册工具 (Mailu 邮箱版)")
     print("=" * 60)
+
+    skip_summary = _should_skip_today_due_to_risk(LOG_FILE, RISK_THRESHOLD)
+    if skip_summary:
+        risk_count = int(skip_summary.get("risk_count", 0) or 0)
+        batch_time = skip_summary.get("time")
+        batch_time_str = batch_time.strftime("%Y-%m-%d %H:%M:%S %z") if batch_time else "-"
+        msg = f"检测到上一次执行疑似风控 {risk_count} >= {RISK_THRESHOLD}，今日停止运行"
+        print(f"\n{msg}")
+        print(f"上次执行时间: {batch_time_str}")
+        _append_log(
+            "batch_skip_risk",
+            "skipped due to risk threshold",
+            risk=risk_count,
+            risk_threshold=RISK_THRESHOLD,
+            last_batch_time=batch_time_str,
+        )
+        sys.exit(0)
 
     # 检查 Mailu 配置
     if not MAILU_API_TOKEN:
@@ -1813,11 +2530,13 @@ def main():
         print("\n   按 Enter 继续尝试运行 (可能会失败)...")
         input()
 
-    # 固定代理配置（硬编码）
-    proxy = FIXED_PROXY
+    proxy = _resolve_proxy()
 
     if proxy:
-        print(f"[Info] 使用代理: {proxy}")
+        if USE_FIXED_PROXY and FIXED_PROXY and proxy == FIXED_PROXY:
+            print(f"[Info] 使用固定代理: {proxy}")
+        else:
+            print(f"[Info] 使用代理: {proxy}")
     else:
         print("[Info] 未配置代理")
 
@@ -1825,11 +2544,12 @@ def main():
     count_input = input(f"\n注册账号数量 (默认 {DEFAULT_TOTAL_ACCOUNTS}): ").strip()
     total_accounts = int(count_input) if count_input.isdigit() and int(count_input) > 0 else DEFAULT_TOTAL_ACCOUNTS
 
-    workers_input = input("并发数 (默认 3): ").strip()
-    max_workers = int(workers_input) if workers_input.isdigit() and int(workers_input) > 0 else 3
+    workers_input = input("并发数 (默认 1): ").strip()
+    max_workers = int(workers_input) if workers_input.isdigit() and int(workers_input) > 0 else 1
 
-    run_batch(total_accounts=total_accounts, output_file=DEFAULT_OUTPUT_FILE,
-              max_workers=max_workers, proxy=proxy)
+    success_count, _ = run_batch(total_accounts=total_accounts, output_file=DEFAULT_OUTPUT_FILE,
+                                 max_workers=max_workers, proxy=proxy)
+    sys.exit(0 if success_count > 0 else 1)
 
 
 if __name__ == "__main__":
