@@ -97,6 +97,9 @@ TOTAL_ACCOUNTS=10 MAX_WORKERS=3 ./scripts/batch_register.sh
 
 脚本内置运行锁，避免多次定时任务重叠执行。
 
+`scripts/cpa_upload_daily.sh` 用于每天 06:00 上传过去 24 小时创建的账号到 CPA（从 codex_tokens），注册后不再即时上传。
+
+
 ## 输出
 
 注册成功的账号会保存到 `registered_accounts.txt`
