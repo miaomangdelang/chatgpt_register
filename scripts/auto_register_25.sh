@@ -70,7 +70,7 @@ if [[ -n "$OPENCLAW_TARGET" && -x "$OPENCLAW_BIN" ]]; then
       --channel "$OPENCLAW_CHANNEL" \
       --target "$OPENCLAW_TARGET" \
       --message "$RESULT_TEXT" \
-      --silent >/dev/null 2>&1; then
+      --silent 2>>"$LOG_FILE"; then
     echo "[Auto] OpenClaw 通知发送成功" | tee -a "$LOG_FILE"
   else
     echo "[Auto] OpenClaw 通知发送失败" | tee -a "$LOG_FILE"
