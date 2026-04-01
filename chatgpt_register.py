@@ -32,6 +32,7 @@ def _load_config():
     """从 config.json 加载配置，环境变量优先级更高"""
     config = {
         "total_accounts": 5,
+        "max_workers": 1,
         "mailu_base_url": "https://mail.oracle.311200.xyz",
         "mailu_api_token": "",
         "mail_domain": "oracle.311200.xyz",
@@ -41,7 +42,7 @@ def _load_config():
         "imap_ssl": True,
         "imap_folder": "INBOX",
         "imap_timeout": 20,
-        "proxy": "http://192.168.1.137:7890",
+        "proxy": "",
         "output_file": "registered_accounts.txt",
         "enable_oauth": True,
         "oauth_required": True,
@@ -54,10 +55,13 @@ def _load_config():
         "upload_api_url": "",
         "upload_api_token": "",
         "log_file": "logs/register.log",
-        "openclaw_bin": "/home/joing/.npm-global/bin/openclaw",
+        "openclaw_bin": "/usr/bin/openclaw",
         "tg_channel": "telegram",
         "tg_target": "1014334465",
-        "tg_account": "AUSUbot",
+        "tg_account": "botClaw",
+        "tg_bot_token": "",
+        "tg_chat_id": "",
+        "tg_proxy_url": "",
         "tg_notify": True,
         "tg_include_account": True,
         "openai_proxy": "",
@@ -85,6 +89,7 @@ def _load_config():
     config["imap_timeout"] = int(os.environ.get("IMAP_TIMEOUT", config["imap_timeout"]))
     config["proxy"] = os.environ.get("PROXY", config["proxy"])
     config["total_accounts"] = int(os.environ.get("TOTAL_ACCOUNTS", config["total_accounts"]))
+    config["max_workers"] = int(os.environ.get("MAX_WORKERS", config["max_workers"]))
     config["enable_oauth"] = os.environ.get("ENABLE_OAUTH", config["enable_oauth"])
     config["oauth_required"] = os.environ.get("OAUTH_REQUIRED", config["oauth_required"])
     config["oauth_issuer"] = os.environ.get("OAUTH_ISSUER", config["oauth_issuer"])
@@ -100,6 +105,9 @@ def _load_config():
     config["tg_channel"] = os.environ.get("TG_CHANNEL", config["tg_channel"])
     config["tg_target"] = os.environ.get("TG_TARGET", config["tg_target"])
     config["tg_account"] = os.environ.get("TG_ACCOUNT", config["tg_account"])
+    config["tg_bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN", config["tg_bot_token"])
+    config["tg_chat_id"] = os.environ.get("TELEGRAM_CHAT_ID", config["tg_chat_id"])
+    config["tg_proxy_url"] = os.environ.get("TELEGRAM_PROXY_URL", config["tg_proxy_url"])
     config["tg_notify"] = os.environ.get("TG_NOTIFY", config["tg_notify"])
     config["tg_include_account"] = os.environ.get("TG_INCLUDE_ACCOUNT", config["tg_include_account"])
     config["openai_proxy"] = os.environ.get("OPENAI_PROXY", config["openai_proxy"])
@@ -129,6 +137,7 @@ IMAP_FOLDER = _CONFIG.get("imap_folder", "INBOX")
 IMAP_TIMEOUT = int(_CONFIG.get("imap_timeout", 20))
 DEFAULT_TOTAL_ACCOUNTS = _CONFIG["total_accounts"]
 DEFAULT_PROXY = _CONFIG["proxy"]
+DEFAULT_MAX_WORKERS = int(_CONFIG.get("max_workers", 1))
 DEFAULT_OUTPUT_FILE = _CONFIG["output_file"]
 ENABLE_OAUTH = _as_bool(_CONFIG.get("enable_oauth", True))
 OAUTH_REQUIRED = _as_bool(_CONFIG.get("oauth_required", True))
@@ -147,14 +156,17 @@ OPENCLAW_BIN = (_CONFIG.get("openclaw_bin") or "").strip()
 TG_CHANNEL = (_CONFIG.get("tg_channel") or "telegram").strip()
 TG_TARGET = (_CONFIG.get("tg_target") or "").strip()
 TG_ACCOUNT = (_CONFIG.get("tg_account") or "").strip()
+TG_BOT_TOKEN = (_CONFIG.get("tg_bot_token") or "").strip()
+TG_CHAT_ID = (_CONFIG.get("tg_chat_id") or "").strip()
+TG_PROXY_URL = (_CONFIG.get("tg_proxy_url") or "").strip()
 TG_NOTIFY = _as_bool(_CONFIG.get("tg_notify", True))
 TG_INCLUDE_ACCOUNT = _as_bool(_CONFIG.get("tg_include_account", True))
 OPENAI_PROXY = (_CONFIG.get("openai_proxy") or "").strip()
 OPENAI_PROXY_MODE = (_CONFIG.get("openai_proxy_mode") or "inherit").strip().lower()
 
-# 代理固定值（默认仍使用固定代理；可通过环境变量关闭）
-FIXED_PROXY = os.environ.get("FIXED_PROXY", "http://192.168.1.137:7890").strip()
-USE_FIXED_PROXY = _as_bool(os.environ.get("USE_FIXED_PROXY", "true"))
+# 代理固定值（仅在环境变量显式开启时使用）
+FIXED_PROXY = os.environ.get("FIXED_PROXY", "").strip()
+USE_FIXED_PROXY = _as_bool(os.environ.get("USE_FIXED_PROXY", "false"))
 ACTIVE_PROXY = None
 # OTP 等待轮次（秒）：5 分钟 + 10 分钟
 OTP_WAIT_ROUNDS = [300, 600]
@@ -210,12 +222,12 @@ for _code in _RISK_STATUSES_ENV.split(","):
 def _resolve_proxy():
     if USE_FIXED_PROXY and FIXED_PROXY:
         return FIXED_PROXY
+    if DEFAULT_PROXY:
+        return DEFAULT_PROXY
     for key in ("PROXY", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
         val = os.environ.get(key)
         if val:
             return val
-    if DEFAULT_PROXY:
-        return DEFAULT_PROXY
     return ""
 
 
@@ -322,6 +334,39 @@ def _send_openclaw_message(message: str) -> bool:
         return False
 
 
+def _send_telegram_bot_message(message: str) -> bool:
+    if not TG_NOTIFY:
+        return False
+    if not message:
+        return False
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TG_CHAT_ID, "text": message}
+    proxies = None
+    if TG_PROXY_URL:
+        proxies = {"http": TG_PROXY_URL, "https": TG_PROXY_URL}
+    try:
+        resp = curl_requests.post(url, data=data, proxies=proxies, timeout=30)
+    except Exception:
+        return False
+    if resp.status_code != 200:
+        return False
+    try:
+        payload = resp.json()
+    except Exception:
+        return False
+    return bool(payload.get("ok"))
+
+
+def _send_notification(message: str) -> bool:
+    if not TG_NOTIFY:
+        return False
+    if TG_BOT_TOKEN and TG_CHAT_ID:
+        return _send_telegram_bot_message(message)
+    return _send_openclaw_message(message)
+
+
 def _send_error_notification(index, total, email, error_msg, step_info=None):
     if not TG_NOTIFY:
         return False
@@ -350,7 +395,7 @@ def _send_error_notification(index, total, email, error_msg, step_info=None):
             if len(body_preview) > 500:
                 body_preview = body_preview[:500] + "..."
             lines.append(f"Response: {body_preview}")
-    return _send_openclaw_message("\n".join(lines))
+    return _send_notification("\n".join(lines))
 
 
 def _send_success_notification(index, total, email):
@@ -362,7 +407,7 @@ def _send_success_notification(index, total, email):
         f"账号: {index}/{total}",
         f"邮箱: {email or '-'}",
     ]
-    return _send_openclaw_message("\n".join(lines))
+    return _send_notification("\n".join(lines))
 
 
 def _append_log(event: str, message: str, **fields):
@@ -542,14 +587,14 @@ _CHROME_PROFILES = [
         "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
     },
     {
-        "major": 133, "impersonate": "chrome133a",
-        "build": 6943, "patch_range": (33, 153),
-        "sec_ch_ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+        "major": 124, "impersonate": "chrome124",
+        "build": 6367, "patch_range": (0, 150),
+        "sec_ch_ua": '"Google Chrome";v="124", "Chromium";v="124", "Not_A Brand";v="24"',
     },
     {
-        "major": 136, "impersonate": "chrome136",
-        "build": 7103, "patch_range": (48, 175),
-        "sec_ch_ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+        "major": 120, "impersonate": "chrome120",
+        "build": 6099, "patch_range": (0, 200),
+        "sec_ch_ua": '"Google Chrome";v="120", "Chromium";v="120", "Not_A Brand";v="24"',
     },
 ]
 
@@ -970,7 +1015,7 @@ def _create_mailbox_mailu(email_addr: str, password: str):
         f"{MAILU_BASE_URL}/api/v1/user",
         json=payload,
         headers=headers,
-        timeout=20,
+        timeout=30,
         impersonate="chrome131",
     )
 
@@ -1260,7 +1305,7 @@ class ChatGPTRegister:
                 f"{MAILU_BASE_URL}/api/v1/user",
                 json=payload,
                 headers=headers,
-                timeout=20,
+                timeout=30,
                 impersonate=self.impersonate,
             )
             if res.status_code not in [200, 201]:
@@ -2486,15 +2531,16 @@ def run_batch(total_accounts: int = DEFAULT_TOTAL_ACCOUNTS, output_file="registe
     if TG_INCLUDE_ACCOUNT and new_lines > 0 and last_line:
         msg_lines.append(f"账号: {last_line}")
 
-    notify_ok = _send_openclaw_message("\n".join(msg_lines))
+    notify_ok = _send_notification("\n".join(msg_lines))
     _append_log(
         "tg_notify_ok" if notify_ok else "tg_notify_skip",
-        "openclaw message sent" if notify_ok else "openclaw message skipped",
+        "telegram message sent" if notify_ok else "telegram message skipped",
         total_accounts=total_accounts,
         success=success_count,
         failed=fail_count,
-        target=TG_TARGET,
+        target=TG_CHAT_ID or TG_TARGET,
         account=TG_ACCOUNT,
+        mode="bot" if (TG_BOT_TOKEN and TG_CHAT_ID) else "openclaw",
     )
     return success_count, fail_count
 
@@ -2540,13 +2586,8 @@ def main():
     else:
         print("[Info] 未配置代理")
 
-    # 输入注册数量
-    count_input = input(f"\n注册账号数量 (默认 {DEFAULT_TOTAL_ACCOUNTS}): ").strip()
-    total_accounts = int(count_input) if count_input.isdigit() and int(count_input) > 0 else DEFAULT_TOTAL_ACCOUNTS
-
-    workers_input = input("并发数 (默认 1): ").strip()
-    max_workers = int(workers_input) if workers_input.isdigit() and int(workers_input) > 0 else 1
-
+    total_accounts = int(DEFAULT_TOTAL_ACCOUNTS)
+    max_workers = int(DEFAULT_MAX_WORKERS) if DEFAULT_MAX_WORKERS else 1
     success_count, _ = run_batch(total_accounts=total_accounts, output_file=DEFAULT_OUTPUT_FILE,
                                  max_workers=max_workers, proxy=proxy)
     sys.exit(0 if success_count > 0 else 1)

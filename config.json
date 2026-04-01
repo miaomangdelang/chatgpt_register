@@ -1,10 +1,12 @@
 {
   "_comment": "ChatGPT(Mailu)",
 
-  "total_accounts": 1,
+  "total_accounts": 10,
+  "max_workers": 3,
+  "proxy_check_only": false,
 
   "mailu_base_url": "https://mail.oracle.311200.xyz",
-  "mailu_api_token": "",
+  "mailu_api_token": "REDACTED_MAILU_API_TOKEN",
   "mail_domain": "oracle.311200.xyz",
   "mailbox_quota_bytes": 1073741824,
   "imap_host": "mail.oracle.311200.xyz",
@@ -13,7 +15,14 @@
   "imap_folder": "INBOX",
   "imap_timeout": 20,
 
-  "proxy": "http://192.168.1.101:7890",
+  "proxy": "http://192.168.1.138:7890",
+  "direct_test_url": "https://mail.oracle.311200.xyz/",
+  "direct_test_proxy": "http://192.168.1.108:7890",
+  "direct_test_timeout": 20,
+  "direct_test_interval": 60,
+  "proxy_test_url": "https://openai.com/robots.txt",
+  "proxy_test_timeout": 20,
+  "proxy_test_interval": 60,
 
   "output_file": "registered_accounts.txt",
   "enable_oauth": true,
@@ -25,5 +34,13 @@
   "rk_file": "rk.txt",
   "token_json_dir": "codex_tokens",
   "upload_api_url": "http://localhost:8317/v0/management/auth-files",
-  "upload_api_token": "helloworld"
+  "upload_api_token": "helloworld",
+  "log_file": "logs/register.log"
+  ,
+  "tg_channel": "telegram",
+  "tg_target": "1014334465",
+  "tg_account": "botClaw",
+  "tg_bot_token": "REDACTED_TELEGRAM_BOT_TOKEN",
+  "tg_chat_id": "1014334465",
+  "tg_proxy_url": ""
 }
