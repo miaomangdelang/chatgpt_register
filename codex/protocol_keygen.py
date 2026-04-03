@@ -77,7 +77,6 @@ _config = load_config()
 TOTAL_ACCOUNTS = _config.get("total_accounts", 30)
 CONCURRENT_WORKERS = _config.get("concurrent_workers", 1)  # 并发数（默认串行）
 HEADLESS = _config.get("headless", False)  # 是否无头模式运行浏览器
-PROXY = _config.get("proxy", "")
 
 # 邮箱配置
 CF_WORKER_DOMAIN = _config.get("cf_worker_domain", "email.tuxixilax.cfd")
@@ -1660,8 +1659,6 @@ def perform_codex_oauth_login(email, password, registrar_session=None):
         options.add_argument(f"--user-agent={USER_AGENT}")
         if HEADLESS:
             options.add_argument("--headless=new")
-        if PROXY:
-            options.add_argument(f"--proxy-server={PROXY}")
 
         driver = uc.Chrome(version_main=145, options=options, use_subprocess=True)
 

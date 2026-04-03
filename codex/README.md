@@ -16,7 +16,6 @@
   "total_accounts": 800,
   "concurrent_workers": 8,
   "headless": false,
-  "proxy": "http://127.0.0.1:7890",
   "cf_worker_domain": "你的 Cloudflare Worker 域名",
   "cf_email_domain": "你的 Cloudflare 邮箱域名",
   "cf_admin_password": "你的 Cloudflare 管理密码",
@@ -32,10 +31,11 @@
 |--------|------|
 | total_accounts | 生成账号数量 |
 | concurrent_workers | 并发数 |
-| proxy | 代理地址 |
 | cf_worker_domain | Cloudflare Worker 域名 |
 | upload_api_url | CPA 上传 API |
 | cli_proxy_api_base | CPA CLI 代理 API |
+| cli_proxy_management_url | CPA 管理页地址 |
+| cli_proxy_password | CPA 管理密码 |
 
 ## 使用
 

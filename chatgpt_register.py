@@ -42,7 +42,6 @@ def _load_config():
         "imap_ssl": True,
         "imap_folder": "INBOX",
         "imap_timeout": 20,
-        "proxy": "",
         "output_file": "registered_accounts.txt",
         "enable_oauth": True,
         "oauth_required": True,
@@ -61,11 +60,8 @@ def _load_config():
         "tg_account": "botClaw",
         "tg_bot_token": "",
         "tg_chat_id": "",
-        "tg_proxy_url": "",
         "tg_notify": True,
         "tg_include_account": True,
-        "openai_proxy": "",
-        "openai_proxy_mode": "inherit",
     }
 
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -87,7 +83,6 @@ def _load_config():
     config["imap_ssl"] = os.environ.get("IMAP_SSL", config["imap_ssl"])
     config["imap_folder"] = os.environ.get("IMAP_FOLDER", config["imap_folder"])
     config["imap_timeout"] = int(os.environ.get("IMAP_TIMEOUT", config["imap_timeout"]))
-    config["proxy"] = os.environ.get("PROXY", config["proxy"])
     config["total_accounts"] = int(os.environ.get("TOTAL_ACCOUNTS", config["total_accounts"]))
     config["max_workers"] = int(os.environ.get("MAX_WORKERS", config["max_workers"]))
     config["enable_oauth"] = os.environ.get("ENABLE_OAUTH", config["enable_oauth"])
@@ -107,11 +102,8 @@ def _load_config():
     config["tg_account"] = os.environ.get("TG_ACCOUNT", config["tg_account"])
     config["tg_bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN", config["tg_bot_token"])
     config["tg_chat_id"] = os.environ.get("TELEGRAM_CHAT_ID", config["tg_chat_id"])
-    config["tg_proxy_url"] = os.environ.get("TELEGRAM_PROXY_URL", config["tg_proxy_url"])
     config["tg_notify"] = os.environ.get("TG_NOTIFY", config["tg_notify"])
     config["tg_include_account"] = os.environ.get("TG_INCLUDE_ACCOUNT", config["tg_include_account"])
-    config["openai_proxy"] = os.environ.get("OPENAI_PROXY", config["openai_proxy"])
-    config["openai_proxy_mode"] = os.environ.get("OPENAI_PROXY_MODE", config["openai_proxy_mode"])
 
     return config
 
@@ -136,7 +128,6 @@ IMAP_SSL = _as_bool(_CONFIG.get("imap_ssl", True))
 IMAP_FOLDER = _CONFIG.get("imap_folder", "INBOX")
 IMAP_TIMEOUT = int(_CONFIG.get("imap_timeout", 20))
 DEFAULT_TOTAL_ACCOUNTS = _CONFIG["total_accounts"]
-DEFAULT_PROXY = _CONFIG["proxy"]
 DEFAULT_MAX_WORKERS = int(_CONFIG.get("max_workers", 1))
 DEFAULT_OUTPUT_FILE = _CONFIG["output_file"]
 ENABLE_OAUTH = _as_bool(_CONFIG.get("enable_oauth", True))
@@ -158,16 +149,8 @@ TG_TARGET = (_CONFIG.get("tg_target") or "").strip()
 TG_ACCOUNT = (_CONFIG.get("tg_account") or "").strip()
 TG_BOT_TOKEN = (_CONFIG.get("tg_bot_token") or "").strip()
 TG_CHAT_ID = (_CONFIG.get("tg_chat_id") or "").strip()
-TG_PROXY_URL = (_CONFIG.get("tg_proxy_url") or "").strip()
 TG_NOTIFY = _as_bool(_CONFIG.get("tg_notify", True))
 TG_INCLUDE_ACCOUNT = _as_bool(_CONFIG.get("tg_include_account", True))
-OPENAI_PROXY = (_CONFIG.get("openai_proxy") or "").strip()
-OPENAI_PROXY_MODE = (_CONFIG.get("openai_proxy_mode") or "inherit").strip().lower()
-
-# 代理固定值（仅在环境变量显式开启时使用）
-FIXED_PROXY = os.environ.get("FIXED_PROXY", "").strip()
-USE_FIXED_PROXY = _as_bool(os.environ.get("USE_FIXED_PROXY", "false"))
-ACTIVE_PROXY = None
 # OTP 等待轮次（秒）：5 分钟 + 10 分钟
 OTP_WAIT_ROUNDS = [300, 600]
 
@@ -217,62 +200,6 @@ for _code in _RISK_STATUSES_ENV.split(","):
     _code = _code.strip()
     if _code.isdigit():
         RISK_STATUSES.add(int(_code))
-
-
-def _resolve_proxy():
-    if USE_FIXED_PROXY and FIXED_PROXY:
-        return FIXED_PROXY
-    if DEFAULT_PROXY:
-        return DEFAULT_PROXY
-    for key in ("PROXY", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
-        val = os.environ.get(key)
-        if val:
-            return val
-    return ""
-
-
-def _set_active_proxy(proxy):
-    global ACTIVE_PROXY
-    ACTIVE_PROXY = proxy or ""
-
-
-def _get_active_proxy():
-    if ACTIVE_PROXY:
-        return ACTIVE_PROXY
-    return _resolve_proxy()
-
-
-def _resolve_openai_proxy(base_proxy: str):
-    mode = (OPENAI_PROXY_MODE or "inherit").strip().lower()
-    if mode in {"direct", "none", "off"}:
-        return ""
-    if mode in {"proxy", "force"}:
-        return (OPENAI_PROXY or base_proxy or "").strip()
-    return (OPENAI_PROXY or base_proxy or "").strip()
-
-
-def _is_local_hostname(hostname: str) -> bool:
-    if not hostname:
-        return False
-    host = hostname.strip().lower()
-    if host.startswith("[") and host.endswith("]"):
-        host = host[1:-1]
-    return host == "localhost" or host == "::1" or host.startswith("127.")
-
-
-def _resolve_upload_proxy(upload_url: str) -> str:
-    """为上传接口选择代理；本地地址默认直连。"""
-    if "UPLOAD_PROXY" in os.environ:
-        return os.environ.get("UPLOAD_PROXY", "").strip()
-    if "UPLOAD_API_PROXY" in os.environ:
-        return os.environ.get("UPLOAD_API_PROXY", "").strip()
-    try:
-        host = urlparse(upload_url).hostname
-    except Exception:
-        host = None
-    if host and _is_local_hostname(host):
-        return ""
-    return _get_active_proxy()
 
 
 def _count_file_lines(path: str) -> int:
@@ -343,11 +270,8 @@ def _send_telegram_bot_message(message: str) -> bool:
         return False
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     data = {"chat_id": TG_CHAT_ID, "text": message}
-    proxies = None
-    if TG_PROXY_URL:
-        proxies = {"http": TG_PROXY_URL, "https": TG_PROXY_URL}
     try:
-        resp = curl_requests.post(url, data=data, proxies=proxies, timeout=30)
+        resp = curl_requests.post(url, data=data, timeout=30)
     except Exception:
         return False
     if resp.status_code != 200:
@@ -905,14 +829,12 @@ def _save_codex_tokens(email: str, tokens: dict):
 def _upload_token_json(filepath):
     """上传 Token JSON 文件到 CPA 管理平台"""
     mp = None
-    upload_proxy = _resolve_upload_proxy(UPLOAD_API_URL)
     try:
         _append_log(
             "token_upload_start",
             "uploading token json to CPA",
             file=filepath,
             upload_api_url=UPLOAD_API_URL,
-            proxy=upload_proxy,
         )
         from curl_cffi import CurlMime
 
@@ -926,8 +848,6 @@ def _upload_token_json(filepath):
         )
 
         session = curl_requests.Session()
-        if upload_proxy:
-            session.proxies = {"http": upload_proxy, "https": upload_proxy}
 
         resp = session.post(
             UPLOAD_API_URL,
@@ -1189,7 +1109,7 @@ class ChatGPTRegister:
     BASE = "https://chatgpt.com"
     AUTH = "https://auth.openai.com"
 
-    def __init__(self, proxy: str = None, openai_proxy: str = None, tag: str = ""):
+    def __init__(self, tag: str = ""):
         self.tag = tag  # 线程标识，用于日志
         self.last_http_step = None
         self.device_id = str(uuid.uuid4())
@@ -1197,11 +1117,6 @@ class ChatGPTRegister:
         self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _random_chrome_version()
 
         self.session = curl_requests.Session(impersonate=self.impersonate)
-
-        self.proxy = proxy
-        self.openai_proxy = openai_proxy if openai_proxy is not None else proxy
-        if self.openai_proxy:
-            self.session.proxies = {"http": self.openai_proxy, "https": self.openai_proxy}
 
         self.session.headers.update({
             "User-Agent": self.ua,
@@ -1275,8 +1190,6 @@ class ChatGPTRegister:
             "Accept": "application/json",
             "Content-Type": "application/json",
         })
-        if self.proxy:
-            session.proxies = {"http": self.proxy, "https": self.proxy}
         return session
 
     def create_temp_email(self):
@@ -2289,7 +2202,7 @@ class ChatGPTRegister:
 
 # ==================== 并发批量注册 ====================
 
-def _register_one(idx, total, proxy, openai_proxy, output_file):
+def _register_one(idx, total, output_file):
     """单个注册任务 (在线程中运行) - 使用 Mailu 邮箱"""
     reg = None
     email = None
@@ -2300,11 +2213,9 @@ def _register_one(idx, total, proxy, openai_proxy, output_file):
             "register task started",
             index=idx,
             total=total,
-            proxy=proxy,
-            openai_proxy=openai_proxy,
             output_file=output_file,
         )
-        reg = ChatGPTRegister(proxy=proxy, openai_proxy=openai_proxy, tag=f"{idx}")
+        reg = ChatGPTRegister(tag=f"{idx}")
 
         # 1. 创建 Mailu 邮箱
         reg._print("[Mailu] 创建邮箱...")
@@ -2410,7 +2321,7 @@ def _register_one(idx, total, proxy, openai_proxy, output_file):
 
 
 def run_batch(total_accounts: int = DEFAULT_TOTAL_ACCOUNTS, output_file="registered_accounts.txt",
-              max_workers=1, proxy=None, openai_proxy=None):
+              max_workers=1):
     """并发批量注册 - Mailu 邮箱版"""
 
     if not MAILU_API_TOKEN:
@@ -2425,9 +2336,6 @@ def run_batch(total_accounts: int = DEFAULT_TOTAL_ACCOUNTS, output_file="registe
         )
         return 0, 0
 
-    _set_active_proxy(proxy)
-    if openai_proxy is None:
-        openai_proxy = _resolve_openai_proxy(proxy)
     _reset_risk_counter()
     output_start_lines = _count_file_lines(output_file)
     _append_log(
@@ -2435,8 +2343,6 @@ def run_batch(total_accounts: int = DEFAULT_TOTAL_ACCOUNTS, output_file="registe
         "batch registration started",
         total_accounts=total_accounts,
         max_workers=max_workers,
-        proxy=_get_active_proxy(),
-        openai_proxy=openai_proxy,
         output_file=output_file,
         mailu_base_url=MAILU_BASE_URL,
         mail_domain=MAIL_DOMAIN,
@@ -2455,7 +2361,6 @@ def run_batch(total_accounts: int = DEFAULT_TOTAL_ACCOUNTS, output_file="registe
     print(f"  Mailu API: {MAILU_BASE_URL}")
     print(f"  Mail Domain: {MAIL_DOMAIN}")
     print(f"  IMAP: {IMAP_HOST}:{IMAP_PORT} | SSL: {'是' if IMAP_SSL else '否'}")
-    print(f"  OpenAI Proxy: {openai_proxy or '直连'} (mode={OPENAI_PROXY_MODE or 'inherit'})")
     print(f"  OAuth: {'开启' if ENABLE_OAUTH else '关闭'} | required: {'是' if OAUTH_REQUIRED else '否'}")
     if ENABLE_OAUTH:
         print(f"  OAuth Issuer: {OAUTH_ISSUER}")
@@ -2472,7 +2377,7 @@ def run_batch(total_accounts: int = DEFAULT_TOTAL_ACCOUNTS, output_file="registe
         futures = {}
         for idx in range(1, total_accounts + 1):
             future = executor.submit(
-                _register_one, idx, total_accounts, proxy, openai_proxy, output_file
+                _register_one, idx, total_accounts, output_file
             )
             futures[future] = idx
 
@@ -2523,9 +2428,6 @@ def run_batch(total_accounts: int = DEFAULT_TOTAL_ACCOUNTS, output_file="registe
         f"耗时: {elapsed:.1f} 秒",
         f"退出码: {0 if success_count > 0 else 1}",
     ]
-    proxy_used = _get_active_proxy()
-    if proxy_used:
-        msg_lines.append(f"代理: {proxy_used}")
     if success_count > 0:
         msg_lines.append(f"结果文件: {output_file}")
     if TG_INCLUDE_ACCOUNT and new_lines > 0 and last_line:
@@ -2576,20 +2478,10 @@ def main():
         print("\n   按 Enter 继续尝试运行 (可能会失败)...")
         input()
 
-    proxy = _resolve_proxy()
-
-    if proxy:
-        if USE_FIXED_PROXY and FIXED_PROXY and proxy == FIXED_PROXY:
-            print(f"[Info] 使用固定代理: {proxy}")
-        else:
-            print(f"[Info] 使用代理: {proxy}")
-    else:
-        print("[Info] 未配置代理")
-
     total_accounts = int(DEFAULT_TOTAL_ACCOUNTS)
     max_workers = int(DEFAULT_MAX_WORKERS) if DEFAULT_MAX_WORKERS else 1
     success_count, _ = run_batch(total_accounts=total_accounts, output_file=DEFAULT_OUTPUT_FILE,
-                                 max_workers=max_workers, proxy=proxy)
+                                 max_workers=max_workers)
     sys.exit(0 if success_count > 0 else 1)
 
 

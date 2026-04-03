@@ -1,6 +1,6 @@
 # ChatGPT 批量自动注册工具
 
-使用 Mailu 邮箱服务器自动批量注册 ChatGPT 账号，支持并发、代理、OAuth 获取 Token、以及上传到 CPA 面板。
+使用 Mailu 邮箱服务器自动批量注册 ChatGPT 账号，支持并发、OAuth 获取 Token、以及上传到 CPA 面板。
 
 ## 快速开始（3 步）
 
@@ -11,7 +11,13 @@
 ## 1. 安装依赖
 
 ```bash
-pip install curl_cffi
+python3 -m pip install -r requirements.txt
+```
+
+如果你只想安装主注册脚本的最小依赖，也可以手动执行：
+
+```bash
+python3 -m pip install curl_cffi
 ```
 
 ## 2. 配置（config.json）
@@ -30,7 +36,6 @@ pip install curl_cffi
   "imap_ssl": true,
   "imap_folder": "INBOX",
   "imap_timeout": 20,
-  "proxy": "http://127.0.0.1:7890",
   "output_file": "registered_accounts.txt",
   "enable_oauth": true,
   "oauth_required": true,
@@ -60,7 +65,6 @@ pip install curl_cffi
 | imap_ssl | 是否启用 IMAP SSL |
 | imap_folder | IMAP 文件夹（默认 INBOX） |
 | imap_timeout | IMAP 超时（秒） |
-| proxy | 代理地址（可选） |
 | output_file | 输出账号文件 |
 | enable_oauth | 是否启用 OAuth 获取 Token |
 | oauth_required | OAuth 失败是否算失败（true 会导致注册失败） |
@@ -70,7 +74,7 @@ pip install curl_cffi
 | upload_api_url / upload_api_token | CPA 面板上传配置（可选） |
 | log_file | JSONL 日志文件 |
 
-大多数配置可被环境变量覆盖（如 `MAILU_API_TOKEN`、`PROXY`、`TOTAL_ACCOUNTS`、`ENABLE_OAUTH` 等）。
+大多数配置可被环境变量覆盖（如 `MAILU_API_TOKEN`、`TOTAL_ACCOUNTS`、`ENABLE_OAUTH` 等）。
 
 ## 3. 运行方式
 
@@ -95,31 +99,49 @@ TOTAL_ACCOUNTS=5 MAX_WORKERS=1 ./scripts/batch_register.sh
 - `scripts/batch_register.sh` 会优先读取环境变量中的 `MAILU_API_TOKEN`  
 - 如果未设置，会自动从 `config.json` 读取 `mailu_api_token`
 
-## 4. 代理策略（非常重要）
+### 3.3 通过 WARP 容器运行
 
-默认固定代理（代码内置）：
-```
-http://192.168.1.137:7890
-```
+如果你希望只让容器内的对外 IP 走 Cloudflare WARP，而宿主机 IP 保持不变，可以使用仓库自带脚本创建独立容器。
 
-代理选择优先级：
-1. 固定代理（`USE_FIXED_PROXY=1` 且 `FIXED_PROXY` 非空）
-2. 环境变量 `PROXY` / `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
-3. `config.json` 的 `proxy`
-
-如需使用环境代理或 `config.json` 的代理：
+首次创建并初始化 WARP 容器：
 
 ```bash
-export USE_FIXED_PROXY=0
+./scripts/setup_warp_container.sh
 ```
 
-可选：为 OpenAI 单独指定代理
+默认会创建：
+
+- 容器名：`ubuntu22-warp`
+- 镜像：`ubuntu:22.04`
+- 挂载：`/home/miaomangdelang/workspace:/workspace`
+- 能力：`NET_ADMIN`
+- 设备：`/dev/net/tun`
+
+常用 WARP 管理命令：
+
 ```bash
-export OPENAI_PROXY="http://127.0.0.1:7890"
-export OPENAI_PROXY_MODE=inherit   # inherit / force
+./scripts/warp_container.sh status
+./scripts/warp_container.sh ensure
+./scripts/warp_container.sh rotate
+./scripts/warp_container.sh disconnect
 ```
 
-## 5. CPA 面板上传（可选）
+说明：
+
+- `status`：查看 WARP 状态，并同时输出宿主机与容器的 `cdn-cgi/trace`
+- `ensure`：如果未注册或未连接，则自动补齐
+- `rotate`：删除当前注册并重新注册，尝试切换容器出口 IP
+- `disconnect`：断开容器内的 WARP 连接
+
+在 WARP 容器内启动项目的示例：
+
+```bash
+docker exec ubuntu22-warp bash -lc 'cd /workspace/chatgpt_register && PYTHONUNBUFFERED=1 TOTAL_ACCOUNTS=1 MAX_WORKERS=1 ./scripts/batch_register.sh'
+```
+
+更多背景说明见 `WARP_CONTAINER_SETUP.md`。
+
+## 4. CPA 面板上传（可选）
 
 设置以下配置即可在注册成功后自动上传 Token：
 
@@ -128,31 +150,7 @@ export UPLOAD_API_URL="http://127.0.0.1:8317/v0/management/auth-files"
 export UPLOAD_API_TOKEN="你的 CPA 面板密码"
 ```
 
-说明：
-- 若 `UPLOAD_API_URL` 指向 `localhost/127.0.0.1`，上传默认直连（不走代理）
-- 如需强制上传走代理，可设置 `UPLOAD_PROXY`
-
-## 6. 与 proxy-rotator 串联（建议）
-
-方式 A（直接调用 proxy-rotator）：
-```bash
-export USE_FIXED_PROXY=0
-TOTAL_ACCOUNTS=10 MAX_WORKERS=3 \
-  ../proxy-rotator/run_with_selected_proxy.sh --config ../proxy-rotator/config.yaml --refresh -- \
-  ./scripts/batch_register.sh
-```
-
-方式 B（封装脚本）：
-```bash
-./scripts/run_with_proxy_rotator.sh --config ../proxy-rotator/config.yaml --total 10 --workers 3
-```
-
-封装脚本支持：
-- `CLI_PROXY_API_URL` / `CLI_PROXY_API_KEY` 自动映射到上传配置  
-- 自动记录日志 `logs/run_YYYYmmdd_HHMMSS.log`
-- 失败后自动重试（可配置重试次数）
-
-## 7. 自动任务（定时）
+## 5. 自动任务（定时）
 
 `scripts/auto_register_25.sh` 会读取本地私密配置：
 - `.secrets/mailu.env`  
@@ -160,7 +158,6 @@ TOTAL_ACCOUNTS=10 MAX_WORKERS=3 \
 - `.secrets/telegram.env`（结果通知）
   - `TELEGRAM_BOT_TOKEN=...`
   - `TELEGRAM_CHAT_ID=...`
-  - `TELEGRAM_PROXY_URL=...`（可选）
 
 如需使用 `crontab`，建议调用批量脚本：
 
@@ -168,16 +165,14 @@ TOTAL_ACCOUNTS=10 MAX_WORKERS=3 \
 0 */6 * * * /usr/bin/bash -lc 'sleep $((RANDOM%1741+60)); cd /path/to/chatgpt_register && TOTAL_ACCOUNTS=5 MAX_WORKERS=1 ./scripts/batch_register.sh >> ./logs/cron.log 2>&1'
 ```
 
-## 8. 输出与日志
+## 6. 输出与日志
 
 - `registered_accounts.txt`：注册成功账号
 - `ak.txt` / `rk.txt`：Access/Refresh Key
 - `codex_tokens/*.json`：OAuth Token JSON
 - `logs/register.log`：JSONL 详细日志
 - `logs/cron.log`：定时任务输出
-- `logs/run_*.log`：proxy-rotator 封装脚本日志
-
-## 9. 常见问题
+## 7. 常见问题
 
 - OTP 等待时间过长：检查 Mailu 发信是否延迟、IMAP 是否可访问  
 - OAuth OTP 失败：邮箱验证码可能过期或被多次发送覆盖  
@@ -189,10 +184,13 @@ TOTAL_ACCOUNTS=10 MAX_WORKERS=3 \
 chatgpt_register/
 ├── chatgpt_register.py      # 主程序
 ├── config.json              # 配置文件
+├── requirements.txt         # Python 依赖
 ├── README.md                # 本文档
+├── WARP_CONTAINER_SETUP.md  # WARP 容器配置说明
 ├── scripts/
 │   ├── batch_register.sh
-│   └── run_with_proxy_rotator.sh
+│   ├── setup_warp_container.sh
+│   └── warp_container.sh
 ├── codex/                   # Codex 协议密钥生成
 │   ├── config.json
 │   └── protocol_keygen.py
